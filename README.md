@@ -206,3 +206,12 @@ Inspired by the notch-companion concepts shared by design studios — this proje
 [Website](https://louis-cfm.github.io/coucou/) · [Privacy](https://louis-cfm.github.io/coucou/privacy.html) · [Terms](https://louis-cfm.github.io/coucou/terms.html) · [Support](https://louis-cfm.github.io/coucou/support.html)
 
 </div>
+
+## Local-only build (no third-party network traffic)
+
+```
+cd NotchBuddy && xcodegen && xcodebuild -scheme NotchBuddy -configuration Release build \
+  SWIFT_ACTIVE_COMPILATION_CONDITIONS=LOCAL_ONLY
+```
+
+Every request to a host other than `localhost` / `127.0.0.1` is refused (see `LocalOnlyGuard.swift`) and logged to `~/Library/Logs/NotchBuddy/local-only.log`. Only Ollama / LM Studio chat keeps working; cloud integrations are disabled in this build.
