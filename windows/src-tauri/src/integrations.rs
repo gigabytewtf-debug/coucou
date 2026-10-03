@@ -18,9 +18,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::island::WINDOW_LABEL;
 use crate::log;
+use crate::netguard;
 use crate::secrets;
-
-const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the island receives. `event` is only set when something actually changed,
 /// which is what drives the pill badge and the sound.
@@ -43,13 +42,6 @@ pub struct IntegrationEvent {
 
 fn emit(app: &AppHandle, update: IntegrationUpdate) {
     let _ = app.emit_to(WINDOW_LABEL, "integration", update);
-}
-
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .build()
-        .unwrap_or_default()
 }
 
 /// Set from the tray's Pause item. While it is on, nothing reaches the network:
@@ -95,7 +87,8 @@ where
             // integration the user switched off, or a paused app, must make no
             // network calls at all — CLAUDE.md allows talking only to services
             // the user configured, and a disabled one is not configured.
-            if PAUSED.load(Ordering::Relaxed) || !enabled(&app, id) {
+            // The network policy (netguard.rs) only lets Stripe and GitHub out.
+            if PAUSED.load(Ordering::Relaxed) || !netguard::integration_allowed(id) || !enabled(&app, id) {
                 continue;
             }
             poll(app.clone()).await;
@@ -103,8 +96,24 @@ where
     });
 }
 
+const ALL_IDS: [&str; 7] = [
+    "integration_n8n", "integration_vercel", "integration_stripe", "integration_resend",
+    "integration_github", "integration_calcom", "integration_notion",
+];
+
 /// One-shot refresh from the Refresh buttons in the island.
 pub async fn poll_once(app: AppHandle, id: &str) {
+    if !netguard::integration_allowed(id) {
+        if let Some(known) = ALL_IDS.iter().find(|x| **x == id) {
+            emit(&app, IntegrationUpdate {
+                id: known,
+                data: json!({}),
+                error: Some("Blocked by the network policy (only Stripe and GitHub are allowed)".into()),
+                event: None,
+            });
+        }
+        return;
+    }
     match id {
         "integration_stripe" => poll_stripe(app).await,
         "integration_github" => poll_github(app).await,
@@ -146,10 +155,8 @@ fn status_error(code: u16, unauthorised_hint: &str) -> String {
 async fn poll_stripe(app: AppHandle) {
     let Some(key) = secrets::get("stripe-api-key") else { return };
     let auth = format!("Basic {}", crate::claude::base64_for(format!("{key}:").as_bytes()));
-    let http = client();
 
-    let balance = http
-        .get("https://api.stripe.com/v1/balance")
+    let balance = netguard::get("https://api.stripe.com/v1/balance")
         .header("Authorization", &auth)
         .send()
         .await;
@@ -196,8 +203,7 @@ async fn poll_stripe(app: AppHandle) {
         }
     };
 
-    let charges = http
-        .get("https://api.stripe.com/v1/charges?limit=3")
+    let charges = netguard::get("https://api.stripe.com/v1/charges?limit=3")
         .header("Authorization", &auth)
         .send()
         .await;
@@ -266,10 +272,8 @@ async fn poll_stripe(app: AppHandle) {
 
 async fn poll_github(app: AppHandle) {
     let Some(token) = secrets::get("github-token") else { return };
-    let http = client();
 
-    let user = http
-        .get("https://api.github.com/user")
+    let user = netguard::get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "Coucou")
@@ -293,8 +297,7 @@ async fn poll_github(app: AppHandle) {
         .and_then(Value::as_i64)
         .unwrap_or(0);
 
-    let repos = http
-        .get("https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=pushed")
+    let repos = netguard::get("https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=pushed")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "Coucou")
@@ -327,8 +330,7 @@ async fn poll_github(app: AppHandle) {
 
 async fn poll_vercel(app: AppHandle) {
     let Some(token) = secrets::get("vercel-token") else { return };
-    let response = client()
-        .get("https://api.vercel.com/v6/deployments?limit=5")
+    let response = netguard::get("https://api.vercel.com/v6/deployments?limit=5")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/json")
         .send()
@@ -399,8 +401,7 @@ async fn poll_vercel(app: AppHandle) {
 
 async fn poll_resend(app: AppHandle) {
     let Some(key) = secrets::get("resend-api-key") else { return };
-    let response = client()
-        .get("https://api.resend.com/emails?limit=100")
+    let response = netguard::get("https://api.resend.com/emails?limit=100")
         .header("Authorization", format!("Bearer {key}"))
         .header("Accept", "application/json")
         .send()
@@ -456,8 +457,7 @@ async fn poll_resend(app: AppHandle) {
 
 async fn poll_notion(app: AppHandle) {
     let Some(token) = secrets::get("notion-api-key") else { return };
-    let response = client()
-        .post("https://api.notion.com/v1/search")
+    let response = netguard::post("https://api.notion.com/v1/search")
         .header("Authorization", format!("Bearer {token}"))
         .header("Notion-Version", "2022-06-28")
         .header("Content-Type", "application/json")
@@ -548,8 +548,7 @@ fn parse_notion_page(obj: &Value) -> Option<Value> {
 
 async fn poll_calcom(app: AppHandle) {
     let Some(key) = secrets::get("calcom-api-key") else { return };
-    let response = client()
-        .get("https://api.cal.com/v2/bookings?status=upcoming")
+    let response = netguard::get("https://api.cal.com/v2/bookings?status=upcoming")
         .header("Authorization", format!("Bearer {key}"))
         .header("cal-api-version", "2024-08-13")
         .send()
@@ -612,7 +611,6 @@ async fn poll_n8n(app: AppHandle) {
         return;
     };
     let base = raw_base.trim_end_matches('/').to_string();
-    let http = client();
 
     // Same two shapes as the Swift poller: the public API first, then /rest.
     let list_urls = [
@@ -622,7 +620,7 @@ async fn poll_n8n(app: AppHandle) {
 
     let mut items: Option<Vec<Value>> = None;
     for url in &list_urls {
-        let Ok(response) = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
+        let Ok(response) = netguard::get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
         else {
             continue;
         };
@@ -667,7 +665,7 @@ async fn poll_n8n(app: AppHandle) {
     let mut name = "Workflow".to_string();
     let mut detail = None;
     for url in &detail_urls {
-        let Ok(response) = http.get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
+        let Ok(response) = netguard::get(url).header("X-N8N-API-KEY", &key).header("Accept", "application/json").send().await
         else {
             continue;
         };

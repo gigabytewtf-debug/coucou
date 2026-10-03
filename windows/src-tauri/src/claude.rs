@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::netguard;
 use crate::secrets;
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
@@ -158,13 +159,8 @@ pub async fn send(
 }
 
 async fn call(key: &str, body: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
+    let response = netguard::post(ENDPOINT)
         .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response = client
-        .post(ENDPOINT)
         .header("x-api-key", key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("anthropic-beta", FALLBACK_BETA)
@@ -175,7 +171,8 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
         .map_err(|e| format!("Network error: {e}"))?;
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
+    let bytes = netguard::read_capped(response, netguard::limit_for(ENDPOINT)).await?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     if !status.is_success() {
         // Surface the API's own message, which is what makes a bad key obvious.
         let detail = serde_json::from_str::<Value>(&text)

@@ -6,6 +6,7 @@ mod hooks;
 mod integrations;
 mod island;
 mod log;
+mod netguard;
 mod pipe;
 mod platform;
 mod secrets;
