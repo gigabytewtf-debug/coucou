@@ -12,10 +12,14 @@
 //   2. The client resolves names only for allow-listed hosts, and refuses
 //      private, loopback and link-local answers (DNS rebinding).
 //   3. Redirects are never followed, so a key is never replayed to another host.
+//
+// System and environment proxies (HTTPS_PROXY…) are not used: a proxy resolves
+// names itself and would bypass layer 2.
 
 use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::LazyLock;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
@@ -127,23 +131,39 @@ pub fn assess(method: &Method, raw_url: &str) -> Result<Approved, String> {
 fn is_internal(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
-                || v4.octets()[0] == 0
-                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1])) // CGNAT
+                || v4.is_multicast()
+                || o[0] == 0
+                || o[0] >= 240 // reserved
+                || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // benchmarking
         }
         IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // Anything that embeds an IPv4 address is judged by that address.
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_internal(IpAddr::V4(v4));
             }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00 // unique local
-                || (first & 0xffc0) == 0xfe80 // link-local
+            let embedded = |hi: u16, lo: u16| std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            if s[..6] == [0, 0, 0, 0, 0, 0] {
+                return true; // ::, ::1 and the IPv4-compatible block
+            }
+            if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                return is_internal(IpAddr::V4(embedded(s[6], s[7]))); // NAT64
+            }
+            if s[0] == 0x2002 {
+                return is_internal(IpAddr::V4(embedded(s[1], s[2]))); // 6to4
+            }
+            (s[0] & 0xff00) == 0xff00 // multicast
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local
         }
     }
 }
@@ -176,9 +196,13 @@ fn blocked(reason: String) -> Box<dyn Error + Send + Sync> {
     format!("blocked by Coucou's network policy: {reason}").into()
 }
 
+static SEEN_SERVICES: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
 static CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .https_only(true)
+        // A proxy would resolve names itself and skip the checks above, so none is used.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .dns_resolver(std::sync::Arc::new(AllowListResolver))
@@ -199,13 +223,10 @@ const REFUSED: &str = "https://refused.invalid/";
 fn guarded(method: Method, raw_url: &str) -> RequestBuilder {
     match assess(&method, raw_url) {
         Ok(approved) => {
-            log::line(format!(
-                "net  {} {} {} ({:?})",
-                approved.service,
-                method,
-                approved.url.path(),
-                approved.sensitivity
-            ));
+            // One line per service per session: an audit trail without log spam.
+            if SEEN_SERVICES.lock().map(|mut seen| seen.insert(approved.service)).unwrap_or(false) {
+                log::line(format!("net  {} allowed ({:?})", approved.service, approved.sensitivity));
+            }
             CLIENT.request(method, approved.url).timeout(DEFAULT_TIMEOUT)
         }
         Err(reason) => {
@@ -241,6 +262,19 @@ pub async fn read_capped(mut response: reqwest::Response, limit: usize) -> Resul
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// Reads a JSON body under the service's cap; anything unreadable or oversized is `{}`,
+/// which is what the pollers already treat as "no data".
+pub async fn read_json(response: reqwest::Response) -> serde_json::Value {
+    let limit = limit_for(response.url().as_str());
+    match read_capped(response, limit).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({})),
+        Err(e) => {
+            log::line(format!("net  dropped a response: {e}"));
+            serde_json::json!({})
+        }
+    }
 }
 
 /// Response size limit for a URL that was approved earlier (Claude chat reads its
@@ -342,10 +376,10 @@ mod tests {
 
     #[test]
     fn internal_addresses_are_recognised() {
-        for ip in ["127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1"] {
+        for ip in ["127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::1", "2002:a9fe:a9fe::1", "::127.0.0.1", "ff02::1", "fec0::1", "224.0.0.1", "240.0.0.1", "198.18.0.1", "192.0.0.1"] {
             assert!(is_internal(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["8.8.8.8", "160.79.104.10", "140.82.112.5", "2606:4700::1111"] {
+        for ip in ["8.8.8.8", "160.79.104.10", "140.82.112.5", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1"] {
             assert!(!is_internal(ip.parse().unwrap()), "{ip}");
         }
     }

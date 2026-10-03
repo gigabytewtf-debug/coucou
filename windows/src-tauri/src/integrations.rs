@@ -163,7 +163,7 @@ async fn poll_stripe(app: AppHandle) {
 
     let (amount, currency) = match balance {
         Ok(r) if r.status().is_success() => {
-            let json: Value = r.json().await.unwrap_or(json!({}));
+            let json: Value = netguard::read_json(r).await;
             let mut buckets: Vec<Value> = Vec::new();
             for k in ["available", "pending"] {
                 if let Some(arr) = json.get(k).and_then(Value::as_array) {
@@ -211,7 +211,7 @@ async fn poll_stripe(app: AppHandle) {
     if !response.status().is_success() {
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let payments: Vec<Value> = json
         .get("data")
         .and_then(Value::as_array)
@@ -289,7 +289,7 @@ async fn poll_github(app: AppHandle) {
         });
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let public = json.get("public_repos").and_then(Value::as_i64).unwrap_or(0);
     let private = json
         .get("owned_private_repos")
@@ -345,7 +345,7 @@ async fn poll_vercel(app: AppHandle) {
         });
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let terminal = ["READY", "ERROR", "CANCELED"];
     let deployments: Vec<Value> = json
         .get("deployments")
@@ -416,7 +416,7 @@ async fn poll_resend(app: AppHandle) {
         });
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let total = json
         .get("total")
         .or_else(|| json.get("count"))
@@ -477,7 +477,7 @@ async fn poll_notion(app: AppHandle) {
         });
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let pages: Vec<Value> = json
         .get("results")
         .and_then(Value::as_array)
@@ -563,7 +563,7 @@ async fn poll_calcom(app: AppHandle) {
         });
         return;
     }
-    let json: Value = response.json().await.unwrap_or(json!({}));
+    let json: Value = netguard::read_json(response).await;
     let bookings: Vec<Value> = json
         .get("data")
         .and_then(Value::as_array)

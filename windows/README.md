@@ -74,8 +74,11 @@ It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 Credential Manager**, never on disk and never in the interface — the island can
 only ask whether a key exists. Same for every integration key.
 
-No telemetry. The only network requests Coucou makes are to the services you
-configure yourself.
+No telemetry. The only network requests Coucou makes are to an allow-list in
+`src-tauri/src/netguard.rs`: `api.anthropic.com` (chat), `api.stripe.com` and
+`api.github.com`, over HTTPS only, with fixed methods and paths, no redirects, no
+proxy and no private-network answers. Vercel, Resend, Notion, Cal.com and n8n are
+blocked on Windows and Linux. Blocked attempts are written to `coucou.log`.
 
 ## Build it yourself
 

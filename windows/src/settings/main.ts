@@ -447,7 +447,7 @@ async function main() {
     generalSection(),
     h("div", {
       class: "hint",
-      text: "No telemetry. Network requests only go to the services you configure yourself.",
+      text: "No telemetry. Network requests are limited to an allow-list: Claude, Stripe and GitHub only.",
     }),
   );
 
