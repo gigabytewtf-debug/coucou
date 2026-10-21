@@ -109,9 +109,15 @@ def api(method, http_timeout=35, **params):
     return out["result"]
 
 
-def send(chat_id, text, thread_id=None, reply_to=None):
+def send(chat_id, text, thread_id=None, reply_to=None, keyboard=None):
     return api("sendMessage", chat_id=chat_id, text=text,
-               message_thread_id=thread_id, reply_to_message_id=reply_to)
+               message_thread_id=thread_id, reply_to_message_id=reply_to,
+               reply_markup=json.dumps({"inline_keyboard": keyboard}) if keyboard else None)
+
+
+def edit(chat_id, message_id, text, keyboard=None):
+    return api("editMessageText", chat_id=chat_id, message_id=message_id, text=text,
+               reply_markup=json.dumps({"inline_keyboard": keyboard}) if keyboard else None)
 
 
 # ----------------------------------------------------------------- helpers
@@ -218,6 +224,45 @@ def build_report(day):
     return "\n".join(lines)
 
 
+MONTHS = ["Январ", "Феврал", "Март", "Апрел", "Май", "Июн",
+          "Июл", "Август", "Сентябр", "Октябр", "Ноябр", "Декабр"]
+
+
+def calendar_keyboard(year, month):
+    """Inline keyboard with the days of a month; days with records are marked with a dot."""
+    first = datetime(year, month, 1, tzinfo=TZ)
+    days_in_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    rows = [[{"text": t, "callback_data": "noop"} for t in ["Ду", "Се", "Чо", "Па", "Жу", "Ша", "Як"]]]
+    row = [{"text": " ", "callback_data": "noop"}] * first.weekday()
+    for d in range(1, days_in_month.day + 1):
+        key = f"{year:04d}-{month:02d}-{d:02d}"
+        mark = "•" if data["videos"].get(key) else ""
+        row.append({"text": f"{d}{mark}", "callback_data": f"day:{key}"})
+        if len(row) == 7:
+            rows.append(row)
+            row = []
+    if row:
+        row += [{"text": " ", "callback_data": "noop"}] * (7 - len(row))
+        rows.append(row)
+    prev_m = (first - timedelta(days=1))
+    next_m = (days_in_month + timedelta(days=1))
+    rows.append([{"text": "◀ " + MONTHS[prev_m.month - 1], "callback_data": f"month:{prev_m:%Y-%m}"},
+                 {"text": MONTHS[next_m.month - 1] + " ▶", "callback_data": f"month:{next_m:%Y-%m}"}])
+    return rows
+
+
+def calendar_text(year, month):
+    return f"📅 {MONTHS[month - 1]} {year}\nКунни танланг (• — маълумот бор):"
+
+
+def day_report(day):
+    y, m, d = (int(x) for x in day.split("-"))
+    title = f"📅 {d:02d}.{m:02d}.{y}"
+    if day not in data["videos"]:
+        return f"{title}\nБу кун учун маълумот йўқ."
+    return f"{title}\n\n{build_report(day)}"
+
+
 def send_report(day, manual=False):
     text = build_report(day)
     send(config["group_id"], text, thread_id=config["topic_id"])
@@ -314,6 +359,9 @@ def handle_command(msg, cmd, arg):
     elif cmd == "hisobot":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_report(day), thread_id=thread)
+    elif cmd in ("kunlar", "sanalar", "kalendar"):
+        t = now()
+        send(chat_id, calendar_text(t.year, t.month), thread_id=thread, keyboard=calendar_keyboard(t.year, t.month))
     elif cmd == "biriktir":
         target = (msg.get("reply_to_message") or {}).get("from")
         if not target or not arg.strip():
@@ -333,12 +381,39 @@ def handle_command(msg, cmd, arg):
             lines.append(f"{i}. {e} {'✅' if e in bound else '⚠️ ҳали танилмаган'}")
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
-        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
+        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
                       "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/ping — бот ишлаяптими",
              thread_id=thread)
 
 
+def handle_callback(cq):
+    user = cq.get("from") or {}
+    cq_id = cq["id"]
+    msg = cq.get("message") or {}
+    if not is_admin(user):
+        api("answerCallbackQuery", callback_query_id=cq_id, text="Бу тугма фақат админ учун.")
+        return
+    payload = cq.get("data") or ""
+    chat_id, mid = msg["chat"]["id"], msg["message_id"]
+    try:
+        if payload.startswith("day:"):
+            day = payload[4:]
+            y, m, _ = (int(x) for x in day.split("-"))
+            edit(chat_id, mid, day_report(day),
+                 keyboard=[[{"text": "◀ " + MONTHS[m - 1], "callback_data": f"month:{y:04d}-{m:02d}"}]])
+        elif payload.startswith("month:"):
+            y, m = (int(x) for x in payload[6:].split("-"))
+            edit(chat_id, mid, calendar_text(y, m), keyboard=calendar_keyboard(y, m))
+    except RuntimeError as e:
+        if "not modified" not in str(e):
+            raise
+    api("answerCallbackQuery", callback_query_id=cq_id)
+
+
 def handle_update(upd):
+    if "callback_query" in upd:
+        handle_callback(upd["callback_query"])
+        return
     msg = upd.get("message")
     if not msg:
         return
