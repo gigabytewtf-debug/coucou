@@ -51,6 +51,11 @@ DEFAULT_CONFIG = {
     "skip_weekdays": [6],       # 0=Mon ... 6=Sun
     "header": "Кунингиз Барокатли булсин!\nИш вактини бошлади:",
     "show_missing": True,
+    "evening_time": "22:00",
+    "evening_header": "Кунлик хисобот ёзмаганлар:",
+    "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
+    "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
+    "report_min_chars": 10,
     "missing_header": "Ишга келмаганлар (09:00 гача видео ташламаганлар):",
     "employees": [
         "Дилшодахон Сгб",
@@ -258,9 +263,66 @@ def calendar_text(year, month):
 def day_report(day):
     y, m, d = (int(x) for x in day.split("-"))
     title = f"📅 {d:02d}.{m:02d}.{y}"
-    if day not in data["videos"]:
+    if day not in data["videos"] and day not in data.get("reports", {}):
         return f"{title}\nБу кун учун маълумот йўқ."
-    return f"{title}\n\n{build_report(day)}"
+    reports = data.get("reports", {}).get(day, {})
+    rows = sorted(reports.items(), key=lambda kv: kv[1]["time"])
+    cutoff = config["evening_time"] + ":00"
+    evening = ["Кунлик ҳисобот ёзганлар:"] + [f"{i}. {t['time']} - {n}{' (кеч)' if t['time'] >= cutoff else ''}"
+                                              for i, (n, t) in enumerate(rows, 1)]
+    if not rows:
+        evening.append("ҳеч ким")
+    evening += ["", build_evening(day)[0]]
+    return f"{title}\n\n{build_report(day)}\n\n" + "\n".join(evening)
+
+
+def build_evening(day):
+    """Who has not written the daily text report in the topic before evening_time."""
+    cutoff = config["evening_time"] + ":00"
+    written = {n for n, r in data.get("reports", {}).get(day, {}).items() if r["time"] < cutoff}
+    missing = [e for e in config["employees"] if e not in written]
+    if not missing:
+        return config["evening_all_done"], []
+    lines = [config["evening_header"]]
+    lines += [f"{i}. {e}" for i, e in enumerate(missing, 1)]
+    return "\n".join(lines), missing
+
+
+def employee_user_id(name):
+    for uid, n in config["bindings"].items():
+        if n == name:
+            return int(uid)
+    return None
+
+
+def send_evening(day, manual=False):
+    text, missing = build_evening(day)
+    send(config["group_id"], text, thread_id=config["topic_id"])
+    if manual:
+        return
+    data.setdefault("evening_sent", {})[day] = now().isoformat()
+    save_json(DATA_PATH, data)
+    print(f"[{now():%H:%M:%S}] kechki ro'yxat yuborildi ({day}), yozmaganlar: {len(missing)}")
+    unreachable = []
+    for name in missing:
+        uid = employee_user_id(name)
+        if uid is None or str(uid) not in data.get("started", []):
+            unreachable.append(name)
+            continue
+        try:
+            send(uid, config["reminder_text"])
+        except Exception as e:
+            print(f"eslatma yuborilmadi ({name}): {e}")
+            unreachable.append(name)
+    if unreachable:
+        note = ("Шахсий эслатма юборилмади (ҳали ботга Start босмаган ёки танилмаган):\n"
+                + "\n".join(f"- {n}" for n in unreachable)
+                + "\n\nУларга айтинг: @" + BOT_USERNAME + " га кириб Start босишсин.")
+        for admin in config["admins"]:
+            try:
+                send(admin, note)
+            except Exception as e:
+                print("admin xabar xato:", e)
 
 
 def send_report(day, manual=False):
@@ -272,17 +334,24 @@ def send_report(day, manual=False):
     print(f"[{now():%H:%M:%S}] hisobot yuborildi ({day}{', qo‘lda' if manual else ''})")
 
 
+def _due(t, hhmm):
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    minutes = t.hour * 60 + t.minute
+    return (hh * 60 + mm) <= minutes < (hh * 60 + mm + 5)   # only in the 5 minutes after the set time
+
+
 def scheduler():
-    hh, mm = (int(x) for x in config["report_time"].split(":"))
     while True:
         try:
             t = now()
             day = today_key(t)
-            minutes = t.hour * 60 + t.minute
-            due = (hh * 60 + mm) <= minutes < (hh * 60 + mm + 5)   # only in the 5 minutes after report_time
-            if due and t.weekday() not in config["skip_weekdays"] and day not in data["reports_sent"]:
-                with lock:
-                    send_report(day)
+            if t.weekday() not in config["skip_weekdays"]:
+                if _due(t, config["report_time"]) and day not in data["reports_sent"]:
+                    with lock:
+                        send_report(day)
+                if _due(t, config["evening_time"]) and day not in data.setdefault("evening_sent", {}):
+                    with lock:
+                        send_evening(day)
         except Exception as e:  # keep running whatever happens
             print("scheduler xato:", e)
         time.sleep(20)
@@ -308,6 +377,26 @@ def record_video(msg):
                     "user_id": user["id"], "message_id": msg["message_id"]}
     save_json(DATA_PATH, data)
     print(f"[{now():%H:%M:%S}] {name} — {videos[name]['time']}")
+
+
+def record_text_report(msg):
+    user = msg.get("from") or {}
+    if user.get("is_bot"):
+        return
+    text = (msg.get("text") or msg.get("caption") or "").strip()
+    if len(text) < config["report_min_chars"]:
+        return
+    name = match_employee(user)
+    if not name:
+        return
+    t = datetime.fromtimestamp(msg["date"], TZ)
+    day = today_key(t)
+    reports = data.setdefault("reports", {}).setdefault(day, {})
+    if name in reports:
+        return
+    reports[name] = {"time": t.strftime("%H:%M:%S"), "message_id": msg["message_id"]}
+    save_json(DATA_PATH, data)
+    print(f"[{now():%H:%M:%S}] kunlik hisobot: {name} — {reports[name]['time']}")
 
 
 def notify_unknown(user, msg):
@@ -346,6 +435,13 @@ def handle_command(msg, cmd, arg):
     chat_id = msg["chat"]["id"]
     thread = msg.get("message_thread_id")
     if not is_admin(user):
+        if cmd == "start" and msg["chat"]["type"] == "private":
+            started = data.setdefault("started", [])
+            if str(user["id"]) not in started:
+                started.append(str(user["id"]))
+                save_json(DATA_PATH, data)
+            name = match_employee(user)
+            send(chat_id, f"Салом{', ' + name if name else ''}! Эслатмаларни энди шу ерда оласиз.")
         return
     if cmd == "ping":
         send(chat_id, "Бот ишлаяпти ✅", thread_id=thread)
@@ -359,6 +455,8 @@ def handle_command(msg, cmd, arg):
     elif cmd == "hisobot":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_report(day), thread_id=thread)
+    elif cmd == "kechki":
+        send(chat_id, build_evening(today_key())[0], thread_id=thread)
     elif cmd in ("kunlar", "sanalar", "kalendar"):
         t = now()
         send(chat_id, calendar_text(t.year, t.month), thread_id=thread, keyboard=calendar_keyboard(t.year, t.month))
@@ -378,10 +476,12 @@ def handle_command(msg, cmd, arg):
         bound = {v: k for k, v in config["bindings"].items()}
         lines = ["Ходимлар рўйхати:"]
         for i, e in enumerate(config["employees"], 1):
-            lines.append(f"{i}. {e} {'✅' if e in bound else '⚠️ ҳали танилмаган'}")
+            st = "📩" if e in bound and bound[e] in data.get("started", []) else ""
+            lines.append(f"{i}. {e} {'✅' if e in bound else '⚠️ ҳали танилмаган'} {st}".rstrip())
+        lines.append("\n✅ танилган, 📩 ботга Start босган (шахсий эслатма олади)")
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
-        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
+        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
                       "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/ping — бот ишлаяптими",
              thread_id=thread)
 
@@ -422,14 +522,22 @@ def handle_update(upd):
     if m:
         handle_command(msg, m.group(1).lower(), m.group(2) or "")
         return
-    if msg["chat"]["id"] == config["group_id"] and in_report_topic(msg) and is_video(msg):
-        record_video(msg)
+    if msg["chat"]["id"] == config["group_id"] and in_report_topic(msg):
+        if is_video(msg):
+            record_video(msg)
+        if msg.get("text") or msg.get("caption"):
+            record_text_report(msg)
 
 
 # ----------------------------------------------------------------- main
 
+BOT_USERNAME = "sagban_yr_bot"
+
+
 def main():
+    global BOT_USERNAME
     me = api("getMe")
+    BOT_USERNAME = me["username"]
     print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, hisobot {config['report_time']})")
     api("deleteWebhook")
     threading.Thread(target=scheduler, daemon=True).start()
