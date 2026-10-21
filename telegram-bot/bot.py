@@ -30,6 +30,12 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on Cyrillic/emoji output
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 DATA_PATH = HERE / "data.json"
