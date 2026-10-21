@@ -19,16 +19,16 @@ Run:  python bot.py          (config in config.json next to this file)
 """
 
 import difflib
+import http.client
 import json
 import os
 import re
+import socket
 import sys
 import time
 import threading
 import traceback
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,6 +46,7 @@ TZ = timezone(timedelta(hours=5))  # Uzbekistan, no DST
 
 DEFAULT_CONFIG = {
     "token": "",
+    "proxy": "",                # optional: "http://host:port" or "socks5://user:pass@host:port"
     "group_id": -1002318997025,
     "topic_id": 995,            # message_thread_id of "Кунлик режа"; change with /mavzu
     "admins": [1720865275],     # Telegram user IDs allowed to give commands
@@ -115,20 +116,74 @@ API = f"https://api.telegram.org/bot{TOKEN}/"
 
 # ----------------------------------------------------------------- telegram
 
-def api(method, http_timeout=35, **params):
-    body = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode()
-    req = urllib.request.Request(API + method, data=body)
-    try:
-        with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-            out = json.load(resp)
-    except urllib.error.HTTPError as e:
+API_HOST = "api.telegram.org"
+_conns = {}          # http_timeout -> persistent HTTPS connection (keeps TLS handshakes rare)
+_conn_lock = threading.Lock()
+
+
+def _new_connection(timeout):
+    proxy = (config.get("proxy") or os.environ.get("BOT_PROXY")
+             or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "").strip()
+    if proxy.startswith("socks"):
         try:
-            out = json.load(e)
+            import socks  # PySocks:  pip install pysocks
+        except ImportError:
+            sys.exit("SOCKS proksi uchun PySocks kerak:  pip install pysocks")
+        u = urllib.parse.urlparse(proxy)
+        kind = socks.SOCKS5 if "5" in u.scheme else socks.SOCKS4
+        socks.set_default_proxy(kind, u.hostname, u.port, username=u.username, password=u.password)
+        socket.socket = socks.socksocket
+        return http.client.HTTPSConnection(API_HOST, 443, timeout=timeout)
+    if proxy.startswith("http"):
+        u = urllib.parse.urlparse(proxy)
+        c = http.client.HTTPSConnection(u.hostname, u.port, timeout=timeout)
+        headers = {}
+        if u.username:
+            import base64
+            headers["Proxy-Authorization"] = "Basic " + base64.b64encode(f"{u.username}:{u.password or ''}".encode()).decode()
+        c.set_tunnel(API_HOST, 443, headers)
+        return c
+    return http.client.HTTPSConnection(API_HOST, 443, timeout=timeout)
+
+
+def _drop_connection(timeout):
+    c = _conns.pop(timeout, None)
+    if c is not None:
+        try:
+            c.close()
         except Exception:
-            raise RuntimeError(f"{method}: HTTP {e.code}") from None
-    if not out.get("ok"):
-        raise RuntimeError(f"{method}: {out}")
-    return out["result"]
+            pass
+
+
+def api(method, http_timeout=15, retries=3, **params):
+    """Call a Bot API method over a persistent connection; retry on network errors."""
+    body = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded", "Connection": "keep-alive"}
+    last = None
+    for attempt in range(retries):
+        with _conn_lock:
+            try:
+                conn = _conns.get(http_timeout)
+                if conn is None:
+                    conn = _conns[http_timeout] = _new_connection(http_timeout)
+                conn.request("POST", f"/bot{TOKEN}/{method}", body, headers)
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (OSError, http.client.HTTPException) as e:   # timeouts, resets, TLS, closed keep-alive
+                _drop_connection(http_timeout)
+                last = e
+                if attempt < retries - 1:
+                    time.sleep(1 + attempt)
+                continue
+        try:
+            out = json.loads(raw)
+        except ValueError:
+            _drop_connection(http_timeout)
+            raise RuntimeError(f"{method}: HTTP {resp.status}, javob JSON emas")
+        if not out.get("ok"):
+            raise RuntimeError(f"{method}: {out}")
+        return out["result"]
+    raise RuntimeError(f"{method}: tarmoq xatosi ({last})")
 
 
 def send(chat_id, text, thread_id=None, reply_to=None, keyboard=None):
@@ -561,14 +616,14 @@ def main():
     offset = data.get("offset", 0)
     while True:
         try:
-            updates = api("getUpdates", http_timeout=60, offset=offset, timeout=30)
+            updates = api("getUpdates", http_timeout=35, retries=1, offset=offset, timeout=25)
         except Exception as e:
             msg = str(e)
             if "409" in msg or "Conflict" in msg:
                 print("DIQQAT: bot boshqa joyda ham ishlayapti (ikkita oyna?). Faqat bittasini qoldiring.")
             else:
                 print("getUpdates xato:", msg)
-            time.sleep(5)
+            time.sleep(3)
             continue
         for upd in updates:
             offset = upd["update_id"] + 1
