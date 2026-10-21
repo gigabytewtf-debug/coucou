@@ -25,6 +25,8 @@ import re
 import sys
 import time
 import threading
+import traceback
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -84,10 +86,19 @@ def load_json(path, default):
 
 
 def save_json(path, obj):
+    """Atomic write; retried because Windows (antivirus, a second bot window) may hold the file briefly."""
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    for attempt in range(5):
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+            return
+        except OSError as e:
+            if attempt == 4:
+                print(f"saqlash xato ({path.name}): {e}")
+                return
+            time.sleep(0.3)
 
 
 config = load_json(CONFIG_PATH, DEFAULT_CONFIG)
@@ -107,8 +118,14 @@ API = f"https://api.telegram.org/bot{TOKEN}/"
 def api(method, http_timeout=35, **params):
     body = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode()
     req = urllib.request.Request(API + method, data=body)
-    with urllib.request.urlopen(req, timeout=http_timeout) as resp:
-        out = json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+            out = json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            out = json.load(e)
+        except Exception:
+            raise RuntimeError(f"{method}: HTTP {e.code}") from None
     if not out.get("ok"):
         raise RuntimeError(f"{method}: {out}")
     return out["result"]
@@ -546,7 +563,11 @@ def main():
         try:
             updates = api("getUpdates", http_timeout=60, offset=offset, timeout=30)
         except Exception as e:
-            print("getUpdates xato:", e)
+            msg = str(e)
+            if "409" in msg or "Conflict" in msg:
+                print("DIQQAT: bot boshqa joyda ham ishlayapti (ikkita oyna?). Faqat bittasini qoldiring.")
+            else:
+                print("getUpdates xato:", msg)
             time.sleep(5)
             continue
         for upd in updates:
@@ -555,11 +576,20 @@ def main():
                 with lock:
                     handle_update(upd)
             except Exception as e:
-                print("update xato:", e)
+                print("update xato:", repr(e))
+                traceback.print_exc()
         if updates:
             data["offset"] = offset
             save_json(DATA_PATH, data)
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            traceback.print_exc()
+            print("Bot xatoga uchradi, 5 soniyadan keyin davom etadi...")
+            time.sleep(5)
