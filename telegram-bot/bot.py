@@ -45,7 +45,7 @@ TZ = timezone(timedelta(hours=5))  # Uzbekistan, no DST
 DEFAULT_CONFIG = {
     "token": "",
     "group_id": -1002318997025,
-    "topic_id": None,           # message_thread_id of "Кунлик режа"; set with /mavzu
+    "topic_id": 995,            # message_thread_id of "Кунлик режа"; change with /mavzu
     "admins": [1720865275],     # Telegram user IDs allowed to give commands
     "report_time": "09:00",
     "skip_weekdays": [6],       # 0=Mon ... 6=Sun
