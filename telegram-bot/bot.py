@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "skip_weekdays": [6],       # 0=Mon ... 6=Sun
     "header": "Кунингиз Барокатли булсин!\nИш вактини бошлади:",
     "show_missing": True,
+    "missing_header": "Ишга келмаганлар (09:00 гача видео ташламаганлар):",
     "employees": [
         "Дилшодахон Сгб",
         "Гулшода👨‍👩‍👧‍👧",
@@ -192,8 +193,10 @@ def is_admin(user):
 # ----------------------------------------------------------------- report
 
 def build_report(day):
+    """Who posted a video before report_time (e.g. 09:00:00) and who did not."""
+    cutoff = config["report_time"] + ":00"
     videos = data["videos"].get(day, {})
-    rows = sorted(videos.values(), key=lambda v: v["time"])
+    rows = sorted((v for v in videos.values() if v["time"] < cutoff), key=lambda v: v["time"])
     lines = [config["header"]]
     for i, v in enumerate(rows, 1):
         lines.append(f"{i}. {v['time']} - {v['name']}")
@@ -204,7 +207,7 @@ def build_report(day):
         missing = [e for e in config["employees"] if e not in seen]
         if missing:
             lines.append("")
-            lines.append("Видео ташламаганлар:")
+            lines.append(config["missing_header"])
             lines.extend(f"- {e}" for e in missing)
     return "\n".join(lines)
 
