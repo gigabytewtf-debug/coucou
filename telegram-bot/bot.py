@@ -118,7 +118,14 @@ API = f"https://api.telegram.org/bot{TOKEN}/"
 
 API_HOST = "api.telegram.org"
 _conns = {}          # http_timeout -> persistent HTTPS connection (keeps TLS handshakes rare)
-_conn_lock = threading.Lock()
+_conn_locks = {}     # http_timeout -> lock, so a send never waits behind the long poll
+_conn_locks_guard = threading.Lock()
+backlog_drained = threading.Event()   # set once the first getUpdates batch after start is processed
+
+
+def _conn_lock(timeout):
+    with _conn_locks_guard:
+        return _conn_locks.setdefault(timeout, threading.Lock())
 
 
 def _new_connection(timeout):
@@ -161,7 +168,7 @@ def api(method, http_timeout=15, retries=3, **params):
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Connection": "keep-alive"}
     last = None
     for attempt in range(retries):
-        with _conn_lock:
+        with _conn_lock(http_timeout):
             try:
                 conn = _conns.get(http_timeout)
                 if conn is None:
@@ -367,9 +374,13 @@ def employee_user_id(name):
     return None
 
 
-def send_evening(day, manual=False):
+def late_note():
+    return f"\n\n⏰ Кечикиб юборилди (бот {now():%H:%M} да ишга тушди)"
+
+
+def send_evening(day, manual=False, late=False):
     text, missing = build_evening(day)
-    send(config["group_id"], text, thread_id=config["topic_id"])
+    send(config["group_id"], text + (late_note() if late else ""), thread_id=config["topic_id"])
     if manual:
         return
     data.setdefault("evening_sent", {})[day] = now().isoformat()
@@ -397,33 +408,37 @@ def send_evening(day, manual=False):
                 print("admin xabar xato:", e)
 
 
-def send_report(day, manual=False):
+def send_report(day, manual=False, late=False):
     text = build_report(day)
-    send(config["group_id"], text, thread_id=config["topic_id"])
+    send(config["group_id"], text + (late_note() if late else ""), thread_id=config["topic_id"])
     if not manual:
         data["reports_sent"][day] = now().isoformat()
         save_json(DATA_PATH, data)
     print(f"[{now():%H:%M:%S}] hisobot yuborildi ({day}{', qo‘lda' if manual else ''})")
 
 
-def _due(t, hhmm):
+def _minutes(hhmm):
     hh, mm = (int(x) for x in hhmm.split(":"))
-    minutes = t.hour * 60 + t.minute
-    return (hh * 60 + mm) <= minutes < (hh * 60 + mm + 5)   # only in the 5 minutes after the set time
+    return hh * 60 + mm
 
 
 def scheduler():
+    """Send the two daily lists. If the bot was off at the set time, send them late the same day:
+    the morning list until evening_time, the evening list until midnight."""
+    backlog_drained.wait()           # first read everything that arrived while the bot was off
     while True:
         try:
             t = now()
             day = today_key(t)
+            m = t.hour * 60 + t.minute
+            rt, et = _minutes(config["report_time"]), _minutes(config["evening_time"])
             if t.weekday() not in config["skip_weekdays"]:
-                if _due(t, config["report_time"]) and day not in data["reports_sent"]:
+                if rt <= m < et and day not in data["reports_sent"]:
                     with lock:
-                        send_report(day)
-                if _due(t, config["evening_time"]) and day not in data.setdefault("evening_sent", {}):
+                        send_report(day, late=m >= rt + 5)
+                if m >= et and day not in data.setdefault("evening_sent", {}):
                     with lock:
-                        send_evening(day)
+                        send_evening(day, late=m >= et + 5)
         except Exception as e:  # keep running whatever happens
             print("scheduler xato:", e)
         time.sleep(20)
@@ -516,7 +531,7 @@ def handle_command(msg, cmd, arg):
             send(chat_id, f"Салом{', ' + name if name else ''}! Эслатмаларни энди шу ерда оласиз.")
         return
     if cmd == "ping":
-        send(chat_id, "Бот ишлаяпти ✅", thread_id=thread)
+        send(chat_id, f"Бот ишлаяпти ✅\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread)
     elif cmd == "mavzu":
         if chat_id != config["group_id"]:
             send(chat_id, "Бу буйруқни гуруҳдаги «Кунлик режа» мавзусида ёзинг.", thread_id=thread)
@@ -610,13 +625,15 @@ def main():
     global BOT_USERNAME
     me = api("getMe")
     BOT_USERNAME = me["username"]
-    print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, hisobot {config['report_time']})")
+    print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, "
+          f"ertalab {config['report_time']}, kechki {config['evening_time']}, bot vaqti {now():%H:%M})")
     api("deleteWebhook")
+    backlog_drained.clear()
     threading.Thread(target=scheduler, daemon=True).start()
     offset = data.get("offset", 0)
     while True:
         try:
-            updates = api("getUpdates", http_timeout=35, retries=1, offset=offset, timeout=25)
+            updates = api("getUpdates", http_timeout=35, retries=1, offset=offset, timeout=25, limit=100)
         except Exception as e:
             msg = str(e)
             if "409" in msg or "Conflict" in msg:
@@ -625,6 +642,8 @@ def main():
                 print("getUpdates xato:", msg)
             time.sleep(3)
             continue
+        if len(updates) < 100 and not backlog_drained.is_set():
+            backlog_drained.set()
         for upd in updates:
             offset = upd["update_id"] + 1
             try:
