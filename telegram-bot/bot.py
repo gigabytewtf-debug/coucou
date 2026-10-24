@@ -59,8 +59,11 @@ DEFAULT_CONFIG = {
     "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
     "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
     "report_min_chars": 10,
-    "photo_topic_id": None,     # count photos only in this topic; None = every topic of the group
-    "photos_in_evening": False, # also append the photo counts to the 22:00 message
+    "photo_topic_name": "Дуконлар расми",   # topic where shop photos are posted (found by name)
+    "photo_topic_id": None,     # set automatically when the topic is seen; may be set by hand
+    "photo_report_time": "22:00",
+    "photo_header": "Бугунги дўконлар расми",
+    "photos_in_evening": False, # also append the photo counts to the 22:00 "Кунлик режа" message
     "missing_header": "Ишга келмаганлар (09:00 гача видео ташламаганлар):",
     "employees": [
         "Дилшодахон Сгб",
@@ -308,11 +311,36 @@ def build_photos(day):
     photos = data.get("photos", {}).get(day, {})
     rows = sorted(config["employees"], key=lambda e: -photos.get(e, {}).get("count", 0))
     total = sum(photos.get(e, {}).get("count", 0) for e in config["employees"])
-    lines = [f"Расмлар сони (жами {total} та):"]
+    lines = [f"{config['photo_header']} (жами {total} та):"]
     for i, e in enumerate(rows, 1):
         n = photos.get(e, {}).get("count", 0)
         lines.append(f"{i}. {e} — {n} та" if n else f"{i}. {e} — йўқ")
     return "\n".join(lines)
+
+
+def learn_topic(msg):
+    """Forum messages carry the topic's name; remember thread_id -> name and resolve configured topics."""
+    thread = msg.get("message_thread_id")
+    created = (msg.get("reply_to_message") or {}).get("forum_topic_created")
+    if thread is None or not created:
+        return
+    topics = data.setdefault("topics", {})
+    if topics.get(str(thread)) != created["name"]:
+        topics[str(thread)] = created["name"]
+        save_json(DATA_PATH, data)
+    if config["photo_topic_id"] is None and norm(created["name"]) == norm(config["photo_topic_name"]):
+        config["photo_topic_id"] = thread
+        save_json(CONFIG_PATH, config)
+        print(f"[{now():%H:%M:%S}] «{created['name']}» mavzusi topildi (ID {thread})")
+
+
+def photo_topic_id():
+    if config["photo_topic_id"] is not None:
+        return config["photo_topic_id"]
+    for tid, name in data.get("topics", {}).items():
+        if norm(name) == norm(config["photo_topic_name"]):
+            return int(tid)
+    return None
 
 
 def in_report_topic(msg):
@@ -449,6 +477,17 @@ def send_evening(day, manual=False, late=False):
                 print("admin xabar xato:", e)
 
 
+def send_photos(day, late=False):
+    thread = photo_topic_id()
+    if thread is None:
+        print("rasm ro'yxati yuborilmadi: «%s» mavzusi hali topilmadi" % config["photo_topic_name"])
+        return
+    send(config["group_id"], build_photos(day) + (late_note() if late else ""), thread_id=thread)
+    data.setdefault("photos_sent", {})[day] = now().isoformat()
+    save_json(DATA_PATH, data)
+    print(f"[{now():%H:%M:%S}] rasm ro'yxati yuborildi ({day})")
+
+
 def send_report(day, manual=False, late=False):
     text = build_report(day)
     send(config["group_id"], text + (late_note() if late else ""), thread_id=config["topic_id"])
@@ -480,6 +519,10 @@ def scheduler():
                 if m >= et and day not in data.setdefault("evening_sent", {}):
                     with lock:
                         send_evening(day, late=m >= et + 5)
+                pt = _minutes(config["photo_report_time"])
+                if m >= pt and day not in data.setdefault("photos_sent", {}) and photo_topic_id() is not None:
+                    with lock:
+                        send_photos(day, late=m >= pt + 5)
         except Exception as e:  # keep running whatever happens
             print("scheduler xato:", e)
         time.sleep(20)
@@ -622,6 +665,11 @@ def handle_command(msg, cmd, arg):
     elif cmd == "hisobot":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_report(day), thread_id=thread)
+    elif cmd == "mavzular":
+        topics = data.get("topics", {})
+        lines = ["Бот кўрган мавзулар:"] + [f"- {n} (ID {t})" for t, n in topics.items()] or ["ҳали йўқ"]
+        lines.append(f"\nКунлик режа: {config['topic_id']}\nДўконлар расми: {photo_topic_id() or 'ҳали топилмади'}")
+        send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd == "rasmlar":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_photos(day), thread_id=thread)
@@ -731,7 +779,8 @@ def handle_update(upd):
         return
     if msg["chat"]["id"] != config["group_id"]:
         return
-    if is_photo(msg) and (config["photo_topic_id"] is None or msg.get("message_thread_id") == config["photo_topic_id"]):
+    learn_topic(msg)
+    if is_photo(msg) and msg.get("message_thread_id") == photo_topic_id():
         record_photo(msg)
     if in_report_topic(msg):
         if is_video(msg):
@@ -749,7 +798,7 @@ def main():
     global BOT_USERNAME
     me = api("getMe")
     BOT_USERNAME = me["username"]
-    print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, "
+    print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, rasm mavzusi {photo_topic_id()}, "
           f"ertalab {config['report_time']}, kechki {config['evening_time']}, bot vaqti {now():%H:%M})")
     api("deleteWebhook")
     backlog_drained.clear()

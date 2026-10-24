@@ -14,7 +14,10 @@
   "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
   "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
   "report_min_chars": 10,
+  "photo_topic_name": "Дуконлар расми",
   "photo_topic_id": null,
+  "photo_report_time": "22:00",
+  "photo_header": "Бугунги дўконлар расми",
   "photos_in_evening": false,
   "employees": [
     "Дилшодахон Сгб",
