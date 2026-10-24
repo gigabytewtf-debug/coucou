@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
     "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
     "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
     "report_min_chars": 10,
+    "photo_topic_id": None,     # count photos only in this topic; None = every topic of the group
+    "photos_in_evening": False, # also append the photo counts to the 22:00 message
     "missing_header": "Ишга келмаганлар (09:00 гача видео ташламаганлар):",
     "employees": [
         "Дилшодахон Сгб",
@@ -278,6 +280,41 @@ def is_video(msg):
     return bool(doc and str(doc.get("mime_type", "")).startswith("video/"))
 
 
+def is_photo(msg):
+    if "photo" in msg:
+        return True
+    doc = msg.get("document")
+    return bool(doc and str(doc.get("mime_type", "")).startswith("image/"))
+
+
+def record_photo(msg):
+    user = msg.get("from") or {}
+    if user.get("is_bot"):
+        return
+    name = match_employee(user)
+    if not name:
+        return
+    t = datetime.fromtimestamp(msg["date"], TZ)
+    day = today_key(t)
+    rec = data.setdefault("photos", {}).setdefault(day, {}).setdefault(name, {"count": 0, "first": None, "last": None})
+    rec["count"] += 1
+    hhmmss = t.strftime("%H:%M:%S")
+    rec["first"] = min(rec["first"] or hhmmss, hhmmss)
+    rec["last"] = max(rec["last"] or hhmmss, hhmmss)
+    save_json(DATA_PATH, data)
+
+
+def build_photos(day):
+    photos = data.get("photos", {}).get(day, {})
+    rows = sorted(config["employees"], key=lambda e: -photos.get(e, {}).get("count", 0))
+    total = sum(photos.get(e, {}).get("count", 0) for e in config["employees"])
+    lines = [f"Расмлар сони (жами {total} та):"]
+    for i, e in enumerate(rows, 1):
+        n = photos.get(e, {}).get("count", 0)
+        lines.append(f"{i}. {e} — {n} та" if n else f"{i}. {e} — йўқ")
+    return "\n".join(lines)
+
+
 def in_report_topic(msg):
     if config["topic_id"] is None:
         return True
@@ -322,7 +359,7 @@ def calendar_keyboard(year, month):
     row = [{"text": " ", "callback_data": "noop"}] * first.weekday()
     for d in range(1, days_in_month.day + 1):
         key = f"{year:04d}-{month:02d}-{d:02d}"
-        mark = "•" if data["videos"].get(key) else ""
+        mark = "•" if data["videos"].get(key) or data.get("reports", {}).get(key) or data.get("photos", {}).get(key) else ""
         row.append({"text": f"{d}{mark}", "callback_data": f"day:{key}"})
         if len(row) == 7:
             rows.append(row)
@@ -344,7 +381,7 @@ def calendar_text(year, month):
 def day_report(day):
     y, m, d = (int(x) for x in day.split("-"))
     title = f"📅 {d:02d}.{m:02d}.{y}"
-    if day not in data["videos"] and day not in data.get("reports", {}):
+    if day not in data["videos"] and day not in data.get("reports", {}) and day not in data.get("photos", {}):
         return f"{title}\nБу кун учун маълумот йўқ."
     reports = data.get("reports", {}).get(day, {})
     rows = sorted(reports.items(), key=lambda kv: kv[1]["time"])
@@ -353,7 +390,7 @@ def day_report(day):
                                               for i, (n, t) in enumerate(rows, 1)]
     if not rows:
         evening.append("ҳеч ким")
-    evening += ["", build_evening(day)[0]]
+    evening += ["", build_evening(day)[0], "", build_photos(day)]
     return f"{title}\n\n{build_report(day)}\n\n" + "\n".join(evening)
 
 
@@ -382,6 +419,8 @@ def late_note():
 
 def send_evening(day, manual=False, late=False):
     text, missing = build_evening(day)
+    if config["photos_in_evening"]:
+        text += "\n\n" + build_photos(day)
     send(config["group_id"], text + (late_note() if late else ""), thread_id=config["topic_id"])
     if manual:
         return
@@ -583,6 +622,9 @@ def handle_command(msg, cmd, arg):
     elif cmd == "hisobot":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_report(day), thread_id=thread)
+    elif cmd == "rasmlar":
+        day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
+        send(chat_id, build_photos(day), thread_id=thread)
     elif cmd == "kechki":
         send(chat_id, build_evening(today_key())[0], thread_id=thread)
     elif cmd in ("kunlar", "sanalar", "kalendar"):
@@ -633,7 +675,7 @@ def handle_command(msg, cmd, arg):
         lines.append("\n✅ танилган, 📩 ботга Start босган (шахсий эслатма олади)")
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
-        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
+        send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/rasmlar — бугун ким нечта расм ташлади\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
                       "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/ping — бот ишлаяптими",
              thread_id=thread)
 
@@ -687,7 +729,11 @@ def handle_update(upd):
     if m:
         handle_command(msg, m.group(1).lower(), m.group(2) or "")
         return
-    if msg["chat"]["id"] == config["group_id"] and in_report_topic(msg):
+    if msg["chat"]["id"] != config["group_id"]:
+        return
+    if is_photo(msg) and (config["photo_topic_id"] is None or msg.get("message_thread_id") == config["photo_topic_id"]):
+        record_photo(msg)
+    if in_report_topic(msg):
         if is_video(msg):
             record_video(msg)
         if msg.get("text") or msg.get("caption"):

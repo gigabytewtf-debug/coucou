@@ -14,6 +14,8 @@
   "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
   "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
   "report_min_chars": 10,
+  "photo_topic_id": null,
+  "photos_in_evening": false,
   "employees": [
     "Дилшодахон Сгб",
     "Гулшода👨‍👩‍👧‍👧",
