@@ -2,3 +2,5 @@ config.json
 data.json
 *.tmp
 __pycache__/
+bot.log
+bot.log.1

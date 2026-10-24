@@ -41,6 +41,37 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 DATA_PATH = HERE / "data.json"
+LOG_PATH = HERE / "bot.log"
+
+
+class _Tee:
+    """Write console output to bot.log as well, so a hidden bot can still be inspected."""
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        try:
+            self.stream.write(text)
+            self.stream.flush()
+        except Exception:
+            pass
+        try:
+            if LOG_PATH.exists() and LOG_PATH.stat().st_size > 2_000_000:
+                os.replace(LOG_PATH, LOG_PATH.with_suffix(".log.1"))
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(text)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+
+
+sys.stdout = _Tee(sys.stdout)
+sys.stderr = _Tee(sys.stderr)
 
 TZ = timezone(timedelta(hours=5))  # Uzbekistan, no DST
 
@@ -796,6 +827,7 @@ BOT_USERNAME = "sagban_yr_bot"
 
 def main():
     global BOT_USERNAME
+    print(f"\n===== {now():%Y-%m-%d %H:%M:%S} ishga tushmoqda =====")
     me = api("getMe")
     BOT_USERNAME = me["username"]
     print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, rasm mavzusi {photo_topic_id()}, "
