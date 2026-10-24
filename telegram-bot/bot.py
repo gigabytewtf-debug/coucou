@@ -61,7 +61,7 @@ DEFAULT_CONFIG = {
     "report_min_chars": 10,
     "photo_topic_name": "Дуконлар расми",   # topic where shop photos are posted (found by name)
     "photo_topic_id": None,     # set automatically when the topic is seen; may be set by hand
-    "photo_report_time": "22:00",
+    "photo_report_time": "18:00",
     "photo_header": "Бугунги дўконлар расми",
     "photos_in_evening": False, # also append the photo counts to the 22:00 "Кунлик режа" message
     "missing_header": "Ишга келмаганлар (09:00 гача видео ташламаганлар):",
