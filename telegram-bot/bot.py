@@ -331,6 +331,13 @@ def record_photo(msg):
     t = datetime.fromtimestamp(msg["date"], TZ)
     day = today_key(t)
     rec = data.setdefault("photos", {}).setdefault(day, {}).setdefault(name, {"count": 0, "first": None, "last": None})
+    group = msg.get("media_group_id")          # an album arrives as several messages sharing this id
+    if group:
+        groups = rec.setdefault("groups", [])
+        if group in groups:
+            return                                # same album: already counted once
+        groups.append(group)
+        del groups[:-50]
     rec["count"] += 1
     hhmmss = t.strftime("%H:%M:%S")
     rec["first"] = min(rec["first"] or hhmmss, hhmmss)
