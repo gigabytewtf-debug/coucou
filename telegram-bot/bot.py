@@ -253,12 +253,14 @@ def match_employee(user):
     nshown = norm(shown)
     if len(nshown) < 3:
         return None                      # emoji-only names: bind with /biriktir
+    words = [norm(w) for w in shown.split() if len(norm(w)) >= 4]
     scored = []
     for emp in config["employees"]:
         nemp = norm(emp)
         first = norm(emp.split()[0]) if emp.split() else nemp
         score = max(similar(nshown, nemp), similar(nshown, first),
-                    1.0 if (nshown.startswith(first) or first.startswith(nshown)) and min(len(first), len(nshown)) >= 5 else 0)
+                    1.0 if (nshown.startswith(first) or first.startswith(nshown)) and min(len(first), len(nshown)) >= 5 else 0,
+                    *(similar(w, first) for w in words))
         scored.append((score, emp))
     scored.sort(reverse=True)
     best, second = scored[0], (scored[1] if len(scored) > 1 else (0, ""))
@@ -453,6 +455,7 @@ def record_video(msg):
     name = match_employee(user)
     if not name:
         print(f"[{now():%H:%M:%S}] noma'lum foydalanuvchi video tashladi: {display_name(user)} ({user.get('id')})")
+        remember_unknown(user, "video", msg)
         notify_unknown(user, msg)
         return
     t = datetime.fromtimestamp(msg["date"], TZ)
@@ -475,6 +478,7 @@ def record_text_report(msg):
         return
     name = match_employee(user)
     if not name:
+        remember_unknown(user, "report", msg)
         return
     t = datetime.fromtimestamp(msg["date"], TZ)
     day = today_key(t)
@@ -486,8 +490,47 @@ def record_text_report(msg):
     print(f"[{now():%H:%M:%S}] kunlik hisobot: {name} — {reports[name]['time']}")
 
 
+def remember_unknown(user, kind, msg):
+    t = datetime.fromtimestamp(msg["date"], TZ)
+    ev = data.setdefault("unknown_events", {}).setdefault(str(user["id"]), [])
+    ev.append({"kind": kind, "day": today_key(t), "time": t.strftime("%H:%M:%S"), "message_id": msg["message_id"]})
+    del ev[:-30]
+    save_json(DATA_PATH, data)
+
+
+def apply_binding(uid, name):
+    """Bind a Telegram user to an employee and replay what they posted while unknown."""
+    config["bindings"][str(uid)] = name
+    save_json(CONFIG_PATH, config)
+    for ev in data.get("unknown_events", {}).pop(str(uid), []):
+        if ev["kind"] == "video":
+            bucket = data["videos"].setdefault(ev["day"], {})
+            if name not in bucket or ev["time"] < bucket[name]["time"]:
+                bucket[name] = {"name": name, "time": ev["time"], "user_id": int(uid), "message_id": ev["message_id"]}
+        else:
+            bucket = data.setdefault("reports", {}).setdefault(ev["day"], {})
+            if name not in bucket or ev["time"] < bucket[name]["time"]:
+                bucket[name] = {"time": ev["time"], "message_id": ev["message_id"]}
+    save_json(DATA_PATH, data)
+
+
+def bind_keyboard(uid):
+    rows, row = [], []
+    for i, e in enumerate(config["employees"], 1):
+        row.append({"text": f"{i}. {e}", "callback_data": f"bind:{uid}:{i}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "❌ Рўйхатда йўқ", "callback_data": f"bindno:{uid}"}])
+    return rows
+
+
 def notify_unknown(user, msg):
     """Tell the admins (privately, once a day per user) about a video from someone not in the list."""
+    if str(user["id"]) in data.get("ignored_users", []):
+        return
     key = f"{today_key()}:{user['id']}"
     seen = data.setdefault("unknown_notified", [])
     if key in seen:
@@ -495,13 +538,11 @@ def notify_unknown(user, msg):
     seen.append(key)
     save_json(DATA_PATH, data)
     link = f"https://t.me/c/{str(config['group_id'])[4:]}/{msg['message_id']}"
-    text = (f"«{display_name(user)}» видео ташлади, лекин рўйхатдан танимадим.\n"
-            f"Хабар: {link}\n"
-            f"Бириктириш учун ўша хабарга reply қилиб ёзинг: /biriktir <рўйхатдаги рақам ёки исм>\n"
-            f"Рўйхат: /xodimlar")
+    text = (f"«{display_name(user)}» (ID {user['id']}) видео ташлади, лекин рўйхатдан танимадим.\n"
+            f"Хабар: {link}\n\nБу ким? Тугмани босинг:")
     for admin in config["admins"]:
         try:
-            send(admin, text)
+            send(admin, text, keyboard=bind_keyboard(user["id"]))
         except Exception as e:
             print("admin xabar xato:", e)
 
@@ -549,16 +590,40 @@ def handle_command(msg, cmd, arg):
         send(chat_id, calendar_text(t.year, t.month), thread_id=thread, keyboard=calendar_keyboard(t.year, t.month))
     elif cmd == "biriktir":
         target = (msg.get("reply_to_message") or {}).get("from")
+        parts = arg.split(None, 1)
+        if target is None and len(parts) == 2 and parts[0].isdigit() and len(parts[0]) >= 6:
+            target = {"id": int(parts[0]), "first_name": f"ID {parts[0]}"}
+            arg = parts[1]
         if not target or not arg.strip():
-            send(chat_id, "Ходимнинг хабарига жавоб (reply) қилиб ёзинг: /biriktir 5  ёки  /biriktir Исм", thread_id=thread)
+            send(chat_id, "Икки йўл бор:\n1) гуруҳда ходимнинг хабарига reply қилиб: /biriktir 5\n"
+                          "2) шахсий чатда ID билан: /biriktir 8115418950 5\n(ID ни бот танимаган одам ҳақидаги хабарида ёзади)",
+                 thread_id=thread)
             return
         name = resolve_employee(arg)
         if not name:
             send(chat_id, "Бундай исм рўйхатда йўқ. /xodimlar билан рўйхатни кўринг.", thread_id=thread)
             return
-        config["bindings"][str(target["id"])] = name
-        save_json(CONFIG_PATH, config)
+        apply_binding(target["id"], name)
         send(chat_id, f"{display_name(target)} → {name} бириктирилди.", thread_id=thread)
+    elif cmd == "qosh":
+        name = arg.strip()
+        if not name:
+            send(chat_id, "Ёзинг: /qosh Исм Фамилия", thread_id=thread)
+        elif name in config["employees"]:
+            send(chat_id, f"{name} аллақачон рўйхатда.", thread_id=thread)
+        else:
+            config["employees"].append(name)
+            save_json(CONFIG_PATH, config)
+            send(chat_id, f"Қўшилди: {name} (рўйхатда {len(config['employees'])}-чи).", thread_id=thread)
+    elif cmd == "ochir":
+        name = resolve_employee(arg) if arg.strip() else None
+        if not name:
+            send(chat_id, "Ёзинг: /ochir 5  ёки  /ochir Исм", thread_id=thread)
+        else:
+            config["employees"].remove(name)
+            config["bindings"] = {k: v for k, v in config["bindings"].items() if v != name}
+            save_json(CONFIG_PATH, config)
+            send(chat_id, f"Ўчирилди: {name}.", thread_id=thread)
     elif cmd == "xodimlar":
         bound = {v: k for k, v in config["bindings"].items()}
         lines = ["Ходимлар рўйхати:"]
@@ -569,7 +634,7 @@ def handle_command(msg, cmd, arg):
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
         send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
-                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/ping — бот ишлаяптими",
+                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/ping — бот ишлаяптими",
              thread_id=thread)
 
 
@@ -588,6 +653,19 @@ def handle_callback(cq):
             y, m, _ = (int(x) for x in day.split("-"))
             edit(chat_id, mid, day_report(day),
                  keyboard=[[{"text": "◀ " + MONTHS[m - 1], "callback_data": f"month:{y:04d}-{m:02d}"}]])
+        elif payload.startswith("bind:"):
+            _, uid, idx = payload.split(":")
+            name = config["employees"][int(idx) - 1]
+            apply_binding(uid, name)
+            edit(chat_id, mid, f"✅ ID {uid} → {name} бириктирилди. Бугунги видеоси/ҳисоботи ҳисобга олинди.")
+        elif payload.startswith("bindno:"):
+            uid = payload.split(":")[1]
+            data.get("unknown_events", {}).pop(uid, None)
+            data.setdefault("ignored_users", [])
+            if uid not in data["ignored_users"]:
+                data["ignored_users"].append(uid)
+            save_json(DATA_PATH, data)
+            edit(chat_id, mid, f"ID {uid} рўйхатда йўқ деб белгиланди, бошқа сўрамайман.")
         elif payload.startswith("month:"):
             y, m = (int(x) for x in payload[6:].split("-"))
             edit(chat_id, mid, calendar_text(y, m), keyboard=calendar_keyboard(y, m))
