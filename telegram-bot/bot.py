@@ -90,6 +90,14 @@ DEFAULT_CONFIG = {
     "evening_all_done": "Бугун ҳамма кунлик ҳисобот ёзди ✅",
     "reminder_text": "Хисобот ёзмаганизи эслатиб утаман",
     "report_min_chars": 10,
+    "report_keywords": ["отчёт", "отчет", "otchet", "otchyot", "ҳисобот", "хисобот", "hisobot"],
+    "heartbeat_times": ["07:00", "17:00"],   # private "bot is alive" messages to the admins
+    "holidays": [],                          # "YYYY-MM-DD" days with no lists (/dam)
+    "reminders": [                           # one-off reminders to the admins (/eslat)
+        {"at": "2026-10-26 10:00", "text": "Эслатма: ботнинг маълумотларини GitHub'га юкланг (/eksport билан файлларни олинг)."},
+        {"at": "2026-10-26 10:00", "text": "Эслатма: BotFather'да /revoke қилиб янги токен олинг ва config.json га ёзинг, кейин stop.bat → start_hidden.vbs."}
+    ],
+    "monthly_time": "10:00",                 # on the 1st: previous month's summary to the admins
     "photo_topic_name": "Дуконлар расми",   # topic where shop photos are posted (found by name)
     "photo_topic_id": None,     # set automatically when the topic is seen; may be set by hand
     "photo_report_time": "18:00",
@@ -479,6 +487,126 @@ def employee_user_id(name):
     return None
 
 
+def is_off_day(day):
+    y, m, d = (int(x) for x in day.split("-"))
+    return datetime(y, m, d).weekday() in config["skip_weekdays"] or day in config["holidays"]
+
+
+def working_days(year, month, until=None):
+    """Working days of the month up to today, starting from the first day the bot has data for."""
+    recorded = [k for part in ("videos", "reports", "photos") for k in data.get(part, {})]
+    first_data = min(recorded) if recorded else None
+    days, d = [], datetime(year, month, 1, tzinfo=TZ)
+    end = until or now()
+    while d.month == month and d.date() <= end.date():
+        key = d.strftime("%Y-%m-%d")
+        if not is_off_day(key) and (first_data is None or key >= first_data):
+            days.append(key)
+        d += timedelta(days=1)
+    return days
+
+
+def build_monthly(year, month):
+    days = working_days(year, month)
+    cutoff_v = config["report_time"] + ":00"
+    cutoff_r = config["evening_time"] + ":00"
+    lines = [f"📊 {MONTHS[month - 1]} {year} — иш кунлари: {len(days)}",
+             "(келди / келмади / ҳисобот йўқ / расмлар)"]
+    rows = []
+    for e in config["employees"]:
+        came = sum(1 for d in days if e in data["videos"].get(d, {}) and data["videos"][d][e]["time"] < cutoff_v)
+        wrote = sum(1 for d in days if e in data.get("reports", {}).get(d, {}) and data["reports"][d][e]["time"] < cutoff_r)
+        photos = sum(data.get("photos", {}).get(d, {}).get(e, {}).get("count", 0) for d in days)
+        rows.append((len(days) - came, e, came, wrote, photos))
+    rows.sort()
+    for i, (absent, e, came, wrote, photos) in enumerate(rows, 1):
+        lines.append(f"{i}. {e} — {came} / {absent} / {len(days) - wrote} / {photos}")
+    return "\n".join(lines)
+
+
+def not_started():
+    """Employees who cannot receive private messages yet."""
+    bound = {v: k for k, v in config["bindings"].items()}
+    started = set(data.get("started", []))
+    out = []
+    for e in config["employees"]:
+        if e not in bound:
+            out.append(f"{e} (ҳали танилмаган)")
+        elif bound[e] not in started:
+            out.append(e)
+    return out
+
+
+def send_admins(text):
+    for admin in config["admins"]:
+        try:
+            send(admin, text)
+        except Exception as e:
+            print("admin xabar xato:", e)
+
+
+def send_heartbeat(hhmm):
+    text = f"Бот тайёр ✅ {now():%d.%m.%Y %H:%M}"
+    ns = not_started()
+    if ns and hhmm == config["heartbeat_times"][-1]:
+        text += "\n\nБотга Start босмаганлар:\n" + "\n".join(f"- {n}" for n in ns)
+    send_admins(text)
+    data.setdefault("heartbeat_sent", {})[f"{today_key()} {hhmm}"] = now().isoformat()
+    save_json(DATA_PATH, data)
+
+
+def due_reminders():
+    """Reminders whose time has come (within the last 12 hours) and not yet sent."""
+    t = now()
+    done = data.setdefault("reminders_done", [])
+    out = []
+    for r in config.get("reminders", []):
+        try:
+            at = datetime.strptime(r["at"], "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        except ValueError:
+            continue
+        key = f"{r['at']}|{r['text']}"
+        if key not in done and at <= t < at + timedelta(hours=12):
+            out.append((key, r["text"]))
+    return out
+
+
+def api_document(chat_id, path, caption=None):
+    """sendDocument with a multipart body (the only call that needs one)."""
+    boundary = "----sagban" + str(int(time.time() * 1000))
+    fields = {"chat_id": str(chat_id)}
+    if caption:
+        fields["caption"] = caption
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    with open(path, "rb") as f:
+        content = f.read()
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{Path(path).name}\"\r\n"
+                 f"Content-Type: application/json\r\n\r\n".encode() + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    conn = _new_connection(60)
+    try:
+        conn.request("POST", f"/bot{TOKEN}/sendDocument", body,
+                     {"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))})
+        out = json.loads(conn.getresponse().read())
+    finally:
+        conn.close()
+    if not out.get("ok"):
+        raise RuntimeError(f"sendDocument: {out}")
+    return out["result"]
+
+
+def export_to(chat_id):
+    exp = HERE / "config_export.json"
+    safe = dict(config)
+    safe["token"] = "***"
+    save_json(exp, safe)
+    api_document(chat_id, DATA_PATH, caption=f"data.json — {now():%d.%m.%Y %H:%M}")
+    api_document(chat_id, exp, caption="config.json (токенсиз)")
+
+
 def late_note():
     return f"\n\n⏰ Кечикиб юборилди (бот {now():%H:%M} да ишга тушди)"
 
@@ -550,7 +678,24 @@ def scheduler():
             day = today_key(t)
             m = t.hour * 60 + t.minute
             rt, et = _minutes(config["report_time"]), _minutes(config["evening_time"])
-            if t.weekday() not in config["skip_weekdays"]:
+            for hb in config["heartbeat_times"]:
+                hm = _minutes(hb)
+                if hm <= m < hm + 60 and f"{day} {hb}" not in data.setdefault("heartbeat_sent", {}):
+                    with lock:
+                        send_heartbeat(hb)
+            for key, text in due_reminders():
+                with lock:
+                    send_admins("⏰ " + text)
+                    data["reminders_done"].append(key)
+                    save_json(DATA_PATH, data)
+            if t.day == 1 and _minutes(config["monthly_time"]) <= m < _minutes(config["monthly_time"]) + 60 \
+                    and data.setdefault("monthly_sent", {}).get(f"{t.year}-{t.month:02d}") is None:
+                prev = t.replace(day=1) - timedelta(days=1)
+                with lock:
+                    send_admins(build_monthly(prev.year, prev.month))
+                    data["monthly_sent"][f"{t.year}-{t.month:02d}"] = now().isoformat()
+                    save_json(DATA_PATH, data)
+            if not is_off_day(day):
                 if rt <= m < et and day not in data["reports_sent"]:
                     with lock:
                         send_report(day, late=m >= rt + 5)
@@ -594,7 +739,12 @@ def record_text_report(msg):
     if user.get("is_bot"):
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    if len(text) < config["report_min_chars"]:
+    low = text.lower()
+    keywords = config.get("report_keywords") or []
+    if keywords:
+        if not any(k.lower() in low for k in keywords):
+            return
+    elif len(text) < config["report_min_chars"]:
         return
     name = match_employee(user)
     if not name:
@@ -689,7 +839,7 @@ def handle_command(msg, cmd, arg):
                 started.append(str(user["id"]))
                 save_json(DATA_PATH, data)
             name = match_employee(user)
-            send(chat_id, f"Салом{', ' + name if name else ''}! Эслатмаларни энди шу ерда оласиз.")
+            send(chat_id, f"Салом{', ' + name if name else ''}! Эслатмаларни энди шу ерда оласиз. (ID: {user['id']})")
         return
     if cmd == "ping":
         send(chat_id, f"Бот ишлаяпти ✅\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread)
@@ -703,6 +853,53 @@ def handle_command(msg, cmd, arg):
     elif cmd == "hisobot":
         day = arg.strip() if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg.strip()) else today_key()
         send(chat_id, build_report(day), thread_id=thread)
+    elif cmd == "dam":
+        days = re.findall(r"\d{4}-\d{2}-\d{2}", arg) or [today_key()]
+        for d in days:
+            if d not in config["holidays"]:
+                config["holidays"].append(d)
+        config["holidays"].sort()
+        save_json(CONFIG_PATH, config)
+        send(chat_id, "Дам кунлари деб белгиланди: " + ", ".join(days) + "\nБу кунларда рўйхатлар чиқмайди.", thread_id=thread)
+    elif cmd == "dam_ochir":
+        days = re.findall(r"\d{4}-\d{2}-\d{2}", arg)
+        config["holidays"] = [d for d in config["holidays"] if d not in days]
+        save_json(CONFIG_PATH, config)
+        send(chat_id, "Ўчирилди: " + (", ".join(days) or "ҳеч нарса"), thread_id=thread)
+    elif cmd == "damlar":
+        send(chat_id, "Дам кунлари:\n" + ("\n".join(f"- {d}" for d in config["holidays"]) or "йўқ (фақат якшанба)"), thread_id=thread)
+    elif cmd == "eslat":
+        m_ = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+)", arg.strip(), re.S)
+        if not m_:
+            send(chat_id, "Ёзинг: /eslat 2026-11-01 10:00 Матн", thread_id=thread)
+        else:
+            hh, mm = m_.group(2).split(":")
+            config.setdefault("reminders", []).append({"at": f"{m_.group(1)} {int(hh):02d}:{mm}", "text": m_.group(3).strip()})
+            save_json(CONFIG_PATH, config)
+            send(chat_id, f"Эслатма қўйилди: {m_.group(1)} {int(hh):02d}:{mm}", thread_id=thread)
+    elif cmd == "eslatmalar":
+        done = set(data.get("reminders_done", []))
+        items = [r for r in config.get("reminders", []) if f"{r['at']}|{r['text']}" not in done]
+        send(chat_id, "Кутилаётган эслатмалар:\n" + ("\n".join(f"- {r['at']} — {r['text']}" for r in items) or "йўқ"), thread_id=thread)
+    elif cmd == "oylik":
+        m_ = re.fullmatch(r"(\d{4})-(\d{2})", arg.strip())
+        y, mo = (int(m_.group(1)), int(m_.group(2))) if m_ else (now().year, now().month)
+        send(chat_id, build_monthly(y, mo), thread_id=thread)
+    elif cmd == "eksport":
+        export_to(chat_id)
+    elif cmd == "admin_qosh":
+        if arg.strip().isdigit():
+            uid = int(arg.strip())
+            if uid not in config["admins"]:
+                config["admins"].append(uid)
+                save_json(CONFIG_PATH, config)
+            send(chat_id, f"Админ қўшилди: {uid}", thread_id=thread)
+        else:
+            send(chat_id, "Ёзинг: /admin_qosh 123456789 (одамнинг Telegram ID си; у ботга /start ёзса ID сини /adminlar да кўрасиз)", thread_id=thread)
+    elif cmd == "adminlar":
+        started = data.get("started", [])
+        send(chat_id, "Админлар: " + ", ".join(str(a) for a in config["admins"]) +
+             "\nБотга Start босган ID лар: " + (", ".join(started) or "йўқ"), thread_id=thread)
     elif cmd == "mavzular":
         topics = data.get("topics", {})
         lines = ["Бот кўрган мавзулар:"] + [f"- {n} (ID {t})" for t, n in topics.items()] or ["ҳали йўқ"]
@@ -762,7 +959,7 @@ def handle_command(msg, cmd, arg):
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
         send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/rasmlar — бугун ким нечта расм ташлади\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
-                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/ping — бот ишлаяптими",
+                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
              thread_id=thread)
 
 
