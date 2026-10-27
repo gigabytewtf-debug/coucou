@@ -357,7 +357,12 @@ def build_photos(day):
     photos = data.get("photos", {}).get(day, {})
     rows = sorted(config["employees"], key=lambda e: -photos.get(e, {}).get("count", 0))
     total = sum(photos.get(e, {}).get("count", 0) for e in config["employees"])
-    lines = [f"{config['photo_header']} (жами {total} та):"]
+    if day == today_key():
+        header = config["photo_header"]
+    else:
+        y, m, d = (int(x) for x in day.split("-"))
+        header = f"Дўконлар расми {d:02d}.{m:02d}.{y}"
+    lines = [f"{header} (жами {total} та):"]
     for i, e in enumerate(rows, 1):
         n = photos.get(e, {}).get("count", 0)
         lines.append(f"{i}. {e} — {n} та" if n else f"{i}. {e} — йўқ")
