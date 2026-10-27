@@ -954,6 +954,24 @@ def handle_command(msg, cmd, arg):
             config["bindings"] = {k: v for k, v in config["bindings"].items() if v != name}
             save_json(CONFIG_PATH, config)
             send(chat_id, f"Ўчирилди: {name}.", thread_id=thread)
+    elif cmd in ("yozdi", "keldi"):
+        # /yozdi 5 [2026-10-27]      /keldi 5 08:40 [2026-10-27]
+        m_ = re.match(r"(.+?)(?:\s+(\d{1,2}:\d{2}))?(?:\s+(\d{4}-\d{2}-\d{2}))?\s*$", arg.strip())
+        name = resolve_employee(m_.group(1)) if m_ and m_.group(1) else None
+        if not name or (cmd == "keldi" and not m_.group(2)):
+            send(chat_id, "Ёзинг: /yozdi 5  ёки  /keldi 5 08:40  (охирига сана қўшса бўлади: 2026-10-27)", thread_id=thread)
+            return
+        day = m_.group(3) or today_key()
+        if cmd == "yozdi":
+            hhmm = m_.group(2) or "21:00"
+            data.setdefault("reports", {}).setdefault(day, {})[name] = {"time": f"{int(hhmm.split(':')[0]):02d}:{hhmm.split(':')[1]}:00", "message_id": 0, "manual": True}
+            save_json(DATA_PATH, data)
+            send(chat_id, f"{day}: {name} — ҳисобот ёзган деб белгиланди.", thread_id=thread)
+        else:
+            hh, mm = m_.group(2).split(":")
+            data["videos"].setdefault(day, {})[name] = {"name": name, "time": f"{int(hh):02d}:{mm}:00", "user_id": 0, "message_id": 0, "manual": True}
+            save_json(DATA_PATH, data)
+            send(chat_id, f"{day}: {name} — {int(hh):02d}:{mm} да келган деб белгиланди.", thread_id=thread)
     elif cmd == "xodimlar":
         bound = {v: k for k, v in config["bindings"].items()}
         lines = ["Ходимлар рўйхати:"]
@@ -964,7 +982,7 @@ def handle_command(msg, cmd, arg):
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
         send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/rasmlar — бугун ким нечта расм ташлади\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
-                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
+                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/yozdi 5 — ходим бугун ҳисобот ёзган деб белгилаш\n/keldi 5 08:40 — ходим келган деб белгилаш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
              thread_id=thread)
 
 
