@@ -954,6 +954,24 @@ def handle_command(msg, cmd, arg):
             config["bindings"] = {k: v for k, v in config["bindings"].items() if v != name}
             save_json(CONFIG_PATH, config)
             send(chat_id, f"Ўчирилди: {name}.", thread_id=thread)
+    elif cmd == "yoz":
+        # /yoz <хабар линки> <матн>   -> reply under that message;   /yoz <матн> -> to «Кунлик режа»
+        m_ = re.match(r"(?:https?://)?t\.me/c/(\d+)/(?:(\d+)/)?(\d+)\s*(.*)$", arg.strip(), re.S)
+        if m_:
+            target_chat = int("-100" + m_.group(1))
+            topic = int(m_.group(2)) if m_.group(2) else None
+            reply_to = int(m_.group(3))
+            text = m_.group(4).strip()
+        else:
+            target_chat, topic, reply_to, text = config["group_id"], config["topic_id"], None, arg.strip()
+        if not text:
+            send(chat_id, "Ёзинг:\n/yoz https://t.me/c/2318997025/994/71022\nМатн (бир неча қатор бўлса ҳам бўлади)", thread_id=thread)
+            return
+        try:
+            send(target_chat, text, thread_id=topic, reply_to=reply_to)
+            send(chat_id, "Гуруҳга ёзилди ✅", thread_id=thread)
+        except Exception as e:
+            send(chat_id, f"Ёзилмади: {e}", thread_id=thread)
     elif cmd in ("yozdi", "keldi"):
         # /yozdi 5 [2026-10-27]      /keldi 5 08:40 [2026-10-27]
         m_ = re.match(r"(.+?)(?:\s+(\d{1,2}:\d{2}))?(?:\s+(\d{4}-\d{2}-\d{2}))?\s*$", arg.strip())
@@ -982,7 +1000,7 @@ def handle_command(msg, cmd, arg):
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
         send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/rasmlar — бугун ким нечта расм ташлади\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
-                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/yozdi 5 — ходим бугун ҳисобот ёзган деб белгилаш\n/keldi 5 08:40 — ходим келган деб белгилаш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
+                      "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/yoz <линк> Матн — гуруҳга ўша хабар тагига бот номидан ёзиш\n/yozdi 5 — ходим бугун ҳисобот ёзган деб белгилаш\n/keldi 5 08:40 — ходим келган деб белгилаш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
              thread_id=thread)
 
 
