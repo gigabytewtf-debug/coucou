@@ -237,10 +237,56 @@ def api(method, http_timeout=15, retries=3, **params):
     raise RuntimeError(f"{method}: tarmoq xatosi ({last})")
 
 
-def send(chat_id, text, thread_id=None, reply_to=None, keyboard=None):
+ADMIN_BUTTONS = [["/hisobot", "/kechki", "/rasmlar"],
+                 ["/kunlar", "/oylik", "/xodimlar"],
+                 ["/ping", "/eslatmalar", "/damlar"]]
+
+ADMIN_COMMANDS = [
+    ("hisobot", "Бугун келганлар рўйхати"),
+    ("kechki", "Бугун ҳисобот ёзмаганлар"),
+    ("rasmlar", "Бугунги расмлар сони"),
+    ("kunlar", "Тақвим: кунни танлаб тўлиқ ҳисобот"),
+    ("oylik", "Ойлик жадвал"),
+    ("xodimlar", "Ходимлар рўйхати"),
+    ("qosh", "Ходим қўшиш: /qosh Исм"),
+    ("ochir", "Ходимни ўчириш: /ochir 5"),
+    ("biriktir", "ID ни ходимга бириктириш: /biriktir ID 5"),
+    ("yoz", "Гуруҳга бот номидан ёзиш: /yoz линк матн"),
+    ("yozdi", "Ҳисобот ёзган деб белгилаш: /yozdi 5"),
+    ("keldi", "Келган деб белгилаш: /keldi 5 08:40"),
+    ("dam", "Дам куни: /dam 2026-11-01"),
+    ("damlar", "Дам кунлари рўйхати"),
+    ("eslat", "Эслатма: /eslat 2026-11-01 10:00 Матн"),
+    ("eslatmalar", "Кутилаётган эслатмалар"),
+    ("eksport", "Маълумотларни файл қилиб олиш"),
+    ("mavzular", "Бот кўрган мавзулар"),
+    ("adminlar", "Админлар рўйхати"),
+    ("ping", "Бот ишлаяптими"),
+    ("menyu", "Пастдаги тугмаларни кўрсатиш"),
+]
+
+
+def send(chat_id, text, thread_id=None, reply_to=None, keyboard=None, buttons=None):
+    markup = None
+    if keyboard:
+        markup = {"inline_keyboard": keyboard}
+    elif buttons:
+        markup = {"keyboard": [[{"text": b} for b in row] for row in buttons],
+                  "resize_keyboard": True, "is_persistent": True}
     return api("sendMessage", chat_id=chat_id, text=text,
                message_thread_id=thread_id, reply_to_message_id=reply_to,
-               reply_markup=json.dumps({"inline_keyboard": keyboard}) if keyboard else None)
+               reply_markup=json.dumps(markup) if markup else None)
+
+
+def setup_commands():
+    """Show the command menu only to the admins (employees see nothing)."""
+    try:
+        api("setMyCommands", commands=json.dumps([]))
+        cmds = json.dumps([{"command": c, "description": d} for c, d in ADMIN_COMMANDS])
+        for admin in config["admins"]:
+            api("setMyCommands", commands=cmds, scope=json.dumps({"type": "chat", "chat_id": admin}))
+    except Exception as e:
+        print("buyruqlar menyusi o'rnatilmadi:", e)
 
 
 def edit(chat_id, message_id, text, keyboard=None):
@@ -846,8 +892,12 @@ def handle_command(msg, cmd, arg):
             name = match_employee(user)
             send(chat_id, f"Салом{', ' + name if name else ''}! Эслатмаларни энди шу ерда оласиз. (ID: {user['id']})")
         return
+    private = msg["chat"]["type"] == "private"
     if cmd == "ping":
-        send(chat_id, f"Бот ишлаяпти ✅\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread)
+        send(chat_id, f"Бот ишлаяпти ✅\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread,
+             buttons=ADMIN_BUTTONS if private else None)
+    elif cmd == "menyu":
+        send(chat_id, "Тугмалар пастда 👇 Тўлиқ рўйхат — чап пастдаги «Меню» тугмасида.", buttons=ADMIN_BUTTONS)
     elif cmd == "mavzu":
         if chat_id != config["group_id"]:
             send(chat_id, "Бу буйруқни гуруҳдаги «Кунлик режа» мавзусида ёзинг.", thread_id=thread)
@@ -898,6 +948,7 @@ def handle_command(msg, cmd, arg):
             if uid not in config["admins"]:
                 config["admins"].append(uid)
                 save_json(CONFIG_PATH, config)
+                setup_commands()
             send(chat_id, f"Админ қўшилди: {uid}", thread_id=thread)
         else:
             send(chat_id, "Ёзинг: /admin_qosh 123456789 (одамнинг Telegram ID си; у ботга /start ёзса ID сини /adminlar да кўрасиз)", thread_id=thread)
@@ -999,6 +1050,8 @@ def handle_command(msg, cmd, arg):
         lines.append("\n✅ танилган, 📩 ботга Start босган (шахсий эслатма олади)")
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd in ("start", "help", "yordam"):
+        if private:
+            send(chat_id, "Тугмалар пастда 👇 Тўлиқ рўйхат — чап пастдаги «Меню» тугмасида.", buttons=ADMIN_BUTTONS)
         send(chat_id, "Буйруқлар:\n/hisobot — бугунги рўйхат\n/kunlar — ойнинг кунлари, кунни танлаб ўша куннинг рўйхатини кўриш\n/kechki — бугун кунлик ҳисобот ёзмаганлар\n/rasmlar — бугун ким нечта расм ташлади\n/mavzu — шу мавзуни «Кунлик режа» қилиб белгилаш\n"
                       "/biriktir Исм — (хабарга reply қилиб) ходимни бириктириш\n/xodimlar — ходимлар рўйхати\n/qosh Исм — ходим қўшиш\n/ochir 5 — ходимни ўчириш\n/yoz <линк> Матн — гуруҳга ўша хабар тагига бот номидан ёзиш\n/yozdi 5 — ходим бугун ҳисобот ёзган деб белгилаш\n/keldi 5 08:40 — ходим келган деб белгилаш\n/dam 2026-11-01 — дам куни\n/eslat 2026-11-01 10:00 Матн — эслатма\n/oylik — ойлик ҳисобот\n/eksport — маълумотларни файл қилиб олиш\n/ping — бот ишлаяптими",
              thread_id=thread)
@@ -1078,6 +1131,7 @@ def main():
     print(f"Bot ishga tushdi: @{me['username']}  (guruh {config['group_id']}, mavzu {config['topic_id']}, rasm mavzusi {photo_topic_id()}, "
           f"ertalab {config['report_time']}, kechki {config['evening_time']}, bot vaqti {now():%H:%M})")
     api("deleteWebhook")
+    setup_commands()
     backlog_drained.clear()
     threading.Thread(target=scheduler, daemon=True).start()
     offset = data.get("offset", 0)
