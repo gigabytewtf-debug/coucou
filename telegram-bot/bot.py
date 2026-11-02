@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import threading
+import unicodedata
 import traceback
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -39,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-02.1"
+VERSION = "2026-11-02.2"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -269,6 +270,7 @@ ADMIN_COMMANDS = [
     ("adminlar", "Админлар рўйхати"),
     ("ping", "Бот ишлаяптими"),
     ("yangila", "GitHub'дан янги нусхани ҳозироқ текшириш"),
+    ("nega", "Нега саналмади: /nega 8"),
     ("menyu", "Пастдаги тугмаларни кўрсатиш"),
 ]
 
@@ -885,23 +887,48 @@ def record_video(msg):
     print(f"[{now():%H:%M:%S}] {name} — {videos[name]['time']}")
 
 
+_HOMOGLYPHS = str.maketrans("abcehkmoptxyëé", "авсенкмортхуее")   # Latin look-alikes -> Cyrillic
+
+
+def fold(text):
+    """Lowercase, strip accents (ё -> е, ë -> e), map Latin look-alike letters to Cyrillic."""
+    t = unicodedata.normalize("NFKD", (text or "").lower())
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.translate(_HOMOGLYPHS)
+
+
+def has_report_keyword(text):
+    keywords = config.get("report_keywords") or []
+    if not keywords:
+        return len(text.strip()) >= config["report_min_chars"]
+    f = fold(text)
+    return any(fold(k) in f for k in keywords)
+
+
+def remember_text(user, msg, text):
+    """Keep today's last text messages per user (for /nega)."""
+    t = datetime.fromtimestamp(msg.get("edit_date") or msg["date"], TZ)
+    bucket = data.setdefault("seen_text", {}).setdefault(today_key(t), {}).setdefault(str(user["id"]), [])
+    bucket.append({"time": t.strftime("%H:%M:%S"), "thread": msg.get("message_thread_id"),
+                   "edited": bool(msg.get("edit_date")), "text": text[:60]})
+    del bucket[:-10]
+    for d in [d for d in data["seen_text"] if d < (now() - timedelta(days=3)).strftime("%Y-%m-%d")]:
+        data["seen_text"].pop(d, None)
+
+
 def record_text_report(msg):
     user = msg.get("from") or {}
     if user.get("is_bot"):
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    low = text.lower()
-    keywords = config.get("report_keywords") or []
-    if keywords:
-        if not any(k.lower() in low for k in keywords):
-            return
-    elif len(text) < config["report_min_chars"]:
+    remember_text(user, msg, text)
+    if not has_report_keyword(text):
         return
     name = match_employee(user)
     if not name:
         remember_unknown(user, "report", msg)
         return
-    t = datetime.fromtimestamp(msg["date"], TZ)
+    t = datetime.fromtimestamp(msg.get("edit_date") or msg["date"], TZ)
     day = today_key(t)
     reports = data.setdefault("reports", {}).setdefault(day, {})
     if name in reports:
@@ -996,6 +1023,33 @@ def handle_command(msg, cmd, arg):
     if cmd == "ping":
         send(chat_id, f"Бот ишлаяпти ✅ (нусха {VERSION})\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread,
              buttons=ADMIN_BUTTONS if private else None)
+    elif cmd == "nega":
+        name = resolve_employee(arg) if arg.strip() else None
+        if not name:
+            send(chat_id, "Ёзинг: /nega 8  ёки  /nega Исм", thread_id=thread)
+            return
+        day = today_key()
+        uid = employee_user_id(name)
+        lines = [f"{name} — {day}"]
+        if uid is None:
+            lines.append("⚠️ Бу ходим ҳали бирорта Telegram аккаунтга бириктирилмаган, шунинг учун хабарлари саналмайди.")
+        else:
+            lines.append(f"Аккаунт ID: {uid}")
+            rep = data.get("reports", {}).get(day, {}).get(name)
+            lines.append(f"Ҳисобот: {'✅ ' + rep['time'] if rep else '❌ саналмаган'}")
+            vid = data["videos"].get(day, {}).get(name)
+            lines.append(f"Видео: {'✅ ' + vid['time'] if vid else '❌ йўқ'}")
+            seen = data.get("seen_text", {}).get(day, {}).get(str(uid), [])
+            if not seen:
+                lines.append("Бугун бу аккаунтдан «Кунлик режа» га матнли хабар келмаган (ёки бот ўша пайт ўчиқ эди).")
+            else:
+                lines.append("Бугунги матнли хабарлари:")
+                for m_ in seen:
+                    ok = has_report_keyword(m_["text"])
+                    where = "" if m_["thread"] == config["topic_id"] else " [бошқа мавзу]"
+                    lines.append(f"- {m_['time']}{' (таҳрир)' if m_['edited'] else ''}{where} {'✅' if ok else '❌ сўз йўқ'}: {m_['text']}")
+            lines.append("\nҚоида: хабарда «отчёт» (отчет/otchet/ҳисобот/hisobot) сўзи бўлиши ва 22:00 гача «Кунлик режа» га ёзилиши керак.")
+        send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd == "yangila":
         send(chat_id, "GitHub текширилмоқда…", thread_id=thread)
         check_update(force=True, reply_to=chat_id)
@@ -1202,6 +1256,11 @@ def handle_update(upd):
         handle_callback(upd["callback_query"])
         return
     msg = upd.get("message")
+    if not msg and upd.get("edited_message"):
+        em = upd["edited_message"]
+        if em.get("chat", {}).get("id") == config["group_id"] and in_report_topic(em) and (em.get("text") or em.get("caption")):
+            record_text_report(em)        # a report added by editing still counts (at the edit time)
+        return
     if not msg:
         return
     text = msg.get("text") or ""
