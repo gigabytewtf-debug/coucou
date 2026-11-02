@@ -19,6 +19,8 @@
   "holidays": [],
   "reminders": [],
   "monthly_time": "10:00",
+  "auto_update": true,
+  "update_check_minutes": 10,
   "photo_topic_name": "Дуконлар расми",
   "photo_topic_id": null,
   "photo_report_time": "18:00",

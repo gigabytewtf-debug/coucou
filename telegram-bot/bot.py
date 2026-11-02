@@ -24,6 +24,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
 import threading
@@ -37,6 +38,8 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+VERSION = "2026-11-02.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -98,6 +101,9 @@ DEFAULT_CONFIG = {
         {"at": "2026-10-26 10:00", "text": "Эслатма: BotFather'да /revoke қилиб янги токен олинг ва config.json га ёзинг, кейин stop.bat → start_hidden.vbs."}
     ],
     "monthly_time": "10:00",                 # on the 1st: previous month's summary to the admins
+    "auto_update": True,                     # fetch new bot.py from GitHub and restart by itself
+    "update_url": "https://raw.githubusercontent.com/gigabytewtf-debug/coucou/claude/trusting-maxwell-p9z6xu/telegram-bot/bot.py",
+    "update_check_minutes": 10,
     "photo_topic_name": "Дуконлар расми",   # topic where shop photos are posted (found by name)
     "photo_topic_id": None,     # set automatically when the topic is seen; may be set by hand
     "photo_report_time": "18:00",
@@ -262,6 +268,7 @@ ADMIN_COMMANDS = [
     ("mavzular", "Бот кўрган мавзулар"),
     ("adminlar", "Админлар рўйхати"),
     ("ping", "Бот ишлаяптими"),
+    ("yangila", "GitHub'дан янги нусхани ҳозироқ текшириш"),
     ("menyu", "Пастдаги тугмаларни кўрсатиш"),
 ]
 
@@ -597,7 +604,7 @@ def send_admins(text):
 
 
 def send_heartbeat(hhmm):
-    text = f"Бот тайёр ✅ {now():%d.%m.%Y %H:%M}"
+    text = f"Бот тайёр ✅ {now():%d.%m.%Y %H:%M} (нусха {VERSION})"
     ns = not_started()
     if ns and hhmm == config["heartbeat_times"][-1]:
         text += "\n\nБотга Start босмаганлар:\n" + "\n".join(f"- {n}" for n in ns)
@@ -714,18 +721,111 @@ def send_report(day, manual=False, late=False):
     print(f"[{now():%H:%M:%S}] hisobot yuborildi ({day}{', qo‘lda' if manual else ''})")
 
 
+# ----------------------------------------------------------------- self-update
+
+def _http_get(url, timeout=30):
+    u = urllib.parse.urlparse(url)
+    proxy = (config.get("proxy") or os.environ.get("BOT_PROXY") or os.environ.get("HTTPS_PROXY")
+             or os.environ.get("https_proxy") or "").strip()
+    if proxy.startswith("http"):
+        pu = urllib.parse.urlparse(proxy)
+        conn = http.client.HTTPSConnection(pu.hostname, pu.port, timeout=timeout)
+        conn.set_tunnel(u.hostname, 443)
+    else:
+        conn = http.client.HTTPSConnection(u.hostname, 443, timeout=timeout)
+    try:
+        conn.request("GET", u.path + (("?" + u.query) if u.query else ""), headers={"User-Agent": "sagban-bot"})
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status != 200:
+            raise RuntimeError(f"HTTP {resp.status}")
+        return body
+    finally:
+        conn.close()
+
+
+def check_update(force=False, reply_to=None):
+    """Download bot.py from GitHub; if it differs and passes a self-test, install it and restart."""
+    if not config.get("auto_update") and not force:
+        return
+    me_path = Path(__file__).resolve()
+    try:
+        remote = _http_get(config["update_url"])
+    except Exception as e:
+        print("yangilanish tekshiruvi:", e)
+        if reply_to:
+            send(reply_to, f"GitHub'дан олиб бўлмади: {e}")
+        return
+    local = me_path.read_bytes()
+    if remote == local:
+        if reply_to:
+            send(reply_to, f"Бот энг янги нусхада ({VERSION}).")
+        return
+    text = remote.decode("utf-8", errors="replace")
+    m = re.search(r'^VERSION = "([^"]+)"', text, re.M)
+    new_version = m.group(1) if m else "?"
+    try:
+        compile(text, "bot.py", "exec")
+    except SyntaxError as e:
+        print("yangi nusxada sintaksis xatosi:", e)
+        send_admins(f"⚠️ GitHub'даги янги нусха ({new_version}) хато, ўрнатилмади: {e}")
+        return
+    candidate = me_path.with_name("bot_new.py")
+    candidate.write_bytes(remote)
+    try:
+        r = subprocess.run([sys.executable, str(candidate), "--selftest"], cwd=str(HERE),
+                           capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        send_admins(f"⚠️ Янги нусха ({new_version}) синовдан ўтмади: {e}")
+        return
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip()[-600:]
+        send_admins(f"⚠️ Янги нусха ({new_version}) синовдан ўтмади, эскиси қолди.\n{tail}")
+        return
+    backup = me_path.with_name("bot.py.bak")
+    backup.write_bytes(local)
+    os.replace(candidate, me_path)
+    data["update_pending"] = {"from": VERSION, "to": new_version, "at": now().isoformat()}
+    save_json(DATA_PATH, data)
+    print(f"[{now():%H:%M:%S}] yangilanish: {VERSION} -> {new_version}, qayta ishga tushmoqda")
+    send_admins(f"🔄 Бот янгиланди: {VERSION} → {new_version}. Қайта ишга тушмоқда…")
+    sys.stdout.flush()
+    os._exit(0)          # start.bat / systemd restarts us
+
+
+def rollback_if_broken():
+    """Called when startup fails right after an update: put the previous bot.py back."""
+    pending = data.get("update_pending")
+    backup = Path(__file__).resolve().with_name("bot.py.bak")
+    if not pending or not backup.exists():
+        return False
+    os.replace(backup, Path(__file__).resolve())
+    data.pop("update_pending", None)
+    save_json(DATA_PATH, data)
+    try:
+        send_admins(f"⚠️ Янги нусха ({pending.get('to')}) ишга тушмади, эскисига ({pending.get('from')}) қайтарилди.")
+    except Exception:
+        pass
+    return True
+
+
 def _minutes(hhmm):
     hh, mm = (int(x) for x in hhmm.split(":"))
     return hh * 60 + mm
 
 
 def scheduler():
-    """Send the two daily lists. If the bot was off at the set time, send them late the same day:
-    the morning list until evening_time, the evening list until midnight."""
+    """Send the daily lists (late the same day if the bot was off at the set time), heartbeats,
+    reminders, the monthly table, and check GitHub for a new bot.py."""
     backlog_drained.wait()           # first read everything that arrived while the bot was off
+    last_update_check = 0.0
     while True:
         try:
             t = now()
+            if time.time() - last_update_check > config.get("update_check_minutes", 10) * 60:
+                last_update_check = time.time()
+                with lock:
+                    check_update()
             day = today_key(t)
             m = t.hour * 60 + t.minute
             rt, et = _minutes(config["report_time"]), _minutes(config["evening_time"])
@@ -894,8 +994,11 @@ def handle_command(msg, cmd, arg):
         return
     private = msg["chat"]["type"] == "private"
     if cmd == "ping":
-        send(chat_id, f"Бот ишлаяпти ✅\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread,
+        send(chat_id, f"Бот ишлаяпти ✅ (нусха {VERSION})\nБот вақти: {now():%H:%M:%S} (Тошкент)", thread_id=thread,
              buttons=ADMIN_BUTTONS if private else None)
+    elif cmd == "yangila":
+        send(chat_id, "GitHub текширилмоқда…", thread_id=thread)
+        check_update(force=True, reply_to=chat_id)
     elif cmd == "menyu":
         send(chat_id, "Тугмалар пастда 👇 Тўлиқ рўйхат — чап пастдаги «Меню» тугмасида.", buttons=ADMIN_BUTTONS)
     elif cmd == "mavzu":
@@ -1132,6 +1235,9 @@ def main():
           f"ertalab {config['report_time']}, kechki {config['evening_time']}, bot vaqti {now():%H:%M})")
     api("deleteWebhook")
     setup_commands()
+    if data.pop("update_pending", None):
+        save_json(DATA_PATH, data)
+        print("yangi nusxa muvaffaqiyatli ishga tushdi:", VERSION)
     backlog_drained.clear()
     threading.Thread(target=scheduler, daemon=True).start()
     offset = data.get("offset", 0)
@@ -1162,6 +1268,10 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:          # the whole module imported and config loaded: good enough
+        print("selftest ok", VERSION)
+        sys.exit(0)
+    failures = 0
     while True:
         try:
             main()
@@ -1169,5 +1279,10 @@ if __name__ == "__main__":
             break
         except Exception:
             traceback.print_exc()
+            failures += 1
+            if failures >= 3 and data.get("update_pending") and rollback_if_broken():
+                print("eski nusxaga qaytarildi, qayta ishga tushmoqda")
+                sys.stdout.flush()
+                os._exit(0)
             print("Bot xatoga uchradi, 5 soniyadan keyin davom etadi...")
             time.sleep(5)

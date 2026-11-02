@@ -4,3 +4,6 @@ data.json
 __pycache__/
 bot.log
 bot.log.1
+bot.py.bak
+bot_new.py
+config_export.json
