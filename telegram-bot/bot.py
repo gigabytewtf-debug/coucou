@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-02.2"
+VERSION = "2026-11-03.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -723,6 +723,28 @@ def send_report(day, manual=False, late=False):
     print(f"[{now():%H:%M:%S}] hisobot yuborildi ({day}{', qo‘lda' if manual else ''})")
 
 
+# ----------------------------------------------------------------- single instance
+
+_lock_fh = None
+
+
+def acquire_single_instance():
+    """Only one bot may run from this folder: a second copy would split the updates between them."""
+    global _lock_fh
+    _lock_fh = open(HERE / "bot.lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            _lock_fh.seek(0)
+            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
 # ----------------------------------------------------------------- self-update
 
 def _http_get(url, timeout=30):
@@ -1306,7 +1328,13 @@ def main():
         except Exception as e:
             msg = str(e)
             if "409" in msg or "Conflict" in msg:
-                print("DIQQAT: bot boshqa joyda ham ishlayapti (ikkita oyna?). Faqat bittasini qoldiring.")
+                print("DIQQAT: bot boshqa joyda ham ishlayapti (ikkita nusxa?). Faqat bittasini qoldiring.")
+                last = data.get("conflict_warned", "")
+                if last < (now() - timedelta(hours=6)).isoformat():
+                    data["conflict_warned"] = now().isoformat()
+                    save_json(DATA_PATH, data)
+                    send_admins("⚠️ Бот икки жойда бир вақтда ишлаяпти (иккита нусха). Рўйхатлар нотўғри чиқади. "
+                                "Компьютерни қайта юкланг ёки stop.bat ни администратор сифатида ишга туширинг.")
             else:
                 print("getUpdates xato:", msg)
             time.sleep(3)
@@ -1330,6 +1358,9 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:          # the whole module imported and config loaded: good enough
         print("selftest ok", VERSION)
         sys.exit(0)
+    while not acquire_single_instance():
+        print("Boshqa nusxa allaqachon ishlayapti (bot.lock band). 60 soniyadan keyin qayta tekshiraman.")
+        time.sleep(60)
     failures = 0
     while True:
         try:
