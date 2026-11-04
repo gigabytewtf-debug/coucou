@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-04.1"
+VERSION = "2026-11-04.2"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -724,6 +724,16 @@ def send_report(day, manual=False, late=False):
     print(f"[{now():%H:%M:%S}] hisobot yuborildi ({day}{', qo‘lda' if manual else ''})")
 
 
+CURRENT_UPDATE_ID = None
+
+
+def commit_offset():
+    """Mark the update being handled as read, so a restart does not replay it."""
+    if CURRENT_UPDATE_ID is not None:
+        data["offset"] = max(data.get("offset", 0), CURRENT_UPDATE_ID + 1)
+        save_json(DATA_PATH, data)
+
+
 # ----------------------------------------------------------------- single instance
 
 _lock_fh = None
@@ -811,6 +821,7 @@ def check_update(force=False, reply_to=None):
     backup.write_bytes(local)
     os.replace(candidate, me_path)
     data["update_pending"] = {"from": VERSION, "to": new_version, "at": now().isoformat()}
+    commit_offset()
     save_json(DATA_PATH, data)
     print(f"[{now():%H:%M:%S}] yangilanish: {VERSION} -> {new_version}, qayta ishga tushmoqda")
     send_admins(f"🔄 Бот янгиланди: {VERSION} → {new_version}. Қайта ишга тушмоқда…")
@@ -1074,6 +1085,7 @@ def handle_command(msg, cmd, arg):
             lines.append("\nҚоида: хабарда «отчёт» (отчет/otchet/ҳисобот/hisobot) сўзи бўлиши ва 22:00 гача «Кунлик режа» га ёзилиши керак.")
         send(chat_id, "\n".join(lines), thread_id=thread)
     elif cmd == "qayta":
+        commit_offset()
         send(chat_id, "Қайта ишга тушмоқда… 15 сониядан кейин /ping ёзиб текширинг.", thread_id=thread)
         print(f"[{now():%H:%M:%S}] admin buyrug'i bilan qayta ishga tushmoqda")
         sys.stdout.flush()
@@ -1314,7 +1326,7 @@ BOT_USERNAME = "sagban_yr_bot"
 
 
 def main():
-    global BOT_USERNAME
+    global BOT_USERNAME, CURRENT_UPDATE_ID
     print(f"\n===== {now():%Y-%m-%d %H:%M:%S} ishga tushmoqda =====")
     me = api("getMe")
     BOT_USERNAME = me["username"]
@@ -1351,12 +1363,14 @@ def main():
             offset = upd["update_id"] + 1
             try:
                 with lock:
+                    CURRENT_UPDATE_ID = upd["update_id"]
                     handle_update(upd)
             except Exception as e:
                 print("update xato:", repr(e))
                 traceback.print_exc()
-        if updates:
-            data["offset"] = offset
+            finally:
+                CURRENT_UPDATE_ID = None
+                data["offset"] = offset
             save_json(DATA_PATH, data)
 
 
