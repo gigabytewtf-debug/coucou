@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-03.1"
+VERSION = "2026-11-04.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -270,6 +270,7 @@ ADMIN_COMMANDS = [
     ("adminlar", "Админлар рўйхати"),
     ("ping", "Бот ишлаяптими"),
     ("yangila", "GitHub'дан янги нусхани ҳозироқ текшириш"),
+    ("qayta", "Ботни қайта ишга тушириш"),
     ("nega", "Нега саналмади: /nega 8"),
     ("menyu", "Пастдаги тугмаларни кўрсатиш"),
 ]
@@ -1072,6 +1073,11 @@ def handle_command(msg, cmd, arg):
                     lines.append(f"- {m_['time']}{' (таҳрир)' if m_['edited'] else ''}{where} {'✅' if ok else '❌ сўз йўқ'}: {m_['text']}")
             lines.append("\nҚоида: хабарда «отчёт» (отчет/otchet/ҳисобот/hisobot) сўзи бўлиши ва 22:00 гача «Кунлик режа» га ёзилиши керак.")
         send(chat_id, "\n".join(lines), thread_id=thread)
+    elif cmd == "qayta":
+        send(chat_id, "Қайта ишга тушмоқда… 15 сониядан кейин /ping ёзиб текширинг.", thread_id=thread)
+        print(f"[{now():%H:%M:%S}] admin buyrug'i bilan qayta ishga tushmoqda")
+        sys.stdout.flush()
+        os._exit(0)          # start.bat / systemd starts us again
     elif cmd == "yangila":
         send(chat_id, "GitHub текширилмоқда…", thread_id=thread)
         check_update(force=True, reply_to=chat_id)
