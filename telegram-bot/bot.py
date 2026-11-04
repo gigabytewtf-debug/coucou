@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-04.2"
+VERSION = "2026-11-04.3"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -725,6 +725,7 @@ def send_report(day, manual=False, late=False):
 
 
 CURRENT_UPDATE_ID = None
+INSTANCE_ID = f"{os.getpid()}-{int(time.time())}"
 
 
 def commit_offset():
@@ -737,20 +738,25 @@ def commit_offset():
 # ----------------------------------------------------------------- single instance
 
 _lock_fh = None
+_mutex = None
 
 
 def acquire_single_instance():
-    """Only one bot may run from this folder: a second copy would split the updates between them."""
-    global _lock_fh
+    """Only one bot may run per folder: a second copy would split the updates between them.
+    Windows: a named mutex (works across normal and Administrator windows). Others: flock."""
+    global _lock_fh, _mutex
+    if os.name == "nt":
+        import ctypes
+        name = "SagbanBot_" + re.sub(r"[^A-Za-z0-9]", "_", str(HERE))
+        kernel32 = ctypes.windll.kernel32
+        _mutex = kernel32.CreateMutexW(None, True, name)
+        if not _mutex:
+            return True                      # could not create: do not block the bot
+        return kernel32.GetLastError() != 183   # ERROR_ALREADY_EXISTS
+    import fcntl
     _lock_fh = open(HERE / "bot.lock", "a+")
     try:
-        if os.name == "nt":
-            import msvcrt
-            _lock_fh.seek(0)
-            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return False
     return True
@@ -1334,9 +1340,10 @@ def main():
           f"ertalab {config['report_time']}, kechki {config['evening_time']}, bot vaqti {now():%H:%M})")
     api("deleteWebhook")
     setup_commands()
+    data["owner"] = INSTANCE_ID          # the latest started copy owns this folder
     if data.pop("update_pending", None):
-        save_json(DATA_PATH, data)
         print("yangi nusxa muvaffaqiyatli ishga tushdi:", VERSION)
+    save_json(DATA_PATH, data)
     backlog_drained.clear()
     threading.Thread(target=scheduler, daemon=True).start()
     offset = data.get("offset", 0)
@@ -1347,6 +1354,15 @@ def main():
             msg = str(e)
             if "409" in msg or "Conflict" in msg:
                 print("DIQQAT: bot boshqa joyda ham ishlayapti (ikkita nusxa?). Faqat bittasini qoldiring.")
+                try:
+                    owner = load_json(DATA_PATH, {}).get("owner")
+                except Exception:
+                    owner = None
+                if owner and owner != INSTANCE_ID:
+                    print("Bu papkada yangiroq nusxa ishlayapti, bu nusxa to'xtaydi.")
+                    sys.stdout.flush()
+                    time.sleep(300)      # keep start.bat from relaunching us every 10 s
+                    os._exit(0)
                 last = data.get("conflict_warned", "")
                 if last < (now() - timedelta(hours=6)).isoformat():
                     data["conflict_warned"] = now().isoformat()
