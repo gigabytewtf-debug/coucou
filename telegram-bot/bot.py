@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-04.3"
+VERSION = "2026-11-05.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -690,6 +690,7 @@ def send_evening(day, manual=False, late=False):
             continue
         try:
             send(uid, config["reminder_text"])
+            print(f"[{now():%H:%M:%S}] eslatma yuborildi: {name} (ID {uid})")
         except Exception as e:
             print(f"eslatma yuborilmadi ({name}): {e}")
             unreachable.append(name)
@@ -938,11 +939,18 @@ def fold(text):
 
 
 def has_report_keyword(text):
+    """True if the text contains a report keyword, or a word spelled close to one (атчет, очет, otchot...)."""
     keywords = config.get("report_keywords") or []
     if not keywords:
         return len(text.strip()) >= config["report_min_chars"]
     f = fold(text)
-    return any(fold(k) in f for k in keywords)
+    folded = [fold(k) for k in keywords]
+    if any(k in f for k in folded):
+        return True
+    for word in re.findall(r"[^\W\d_]+", f):
+        if len(word) >= 4 and any(similar(word, k) >= 0.75 for k in folded):
+            return True
+    return False
 
 
 def remember_text(user, msg, text):
