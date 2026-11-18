@@ -40,7 +40,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows console: never crash on 
     except Exception:
         pass
 
-VERSION = "2026-11-05.1"
+VERSION = "2026-11-18.1"
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -257,6 +257,7 @@ ADMIN_COMMANDS = [
     ("xodimlar", "Ходимлар рўйхати"),
     ("qosh", "Ходим қўшиш: /qosh Исм"),
     ("ochir", "Ходимни ўчириш: /ochir 5"),
+    ("nom", "Исмини ўзгартириш: /nom 5 Янги Исм"),
     ("biriktir", "ID ни ходимга бириктириш: /biriktir ID 5"),
     ("yoz", "Гуруҳга бот номидан ёзиш: /yoz линк матн"),
     ("yozdi", "Ҳисобот ёзган деб белгилаш: /yozdi 5"),
@@ -1252,6 +1253,29 @@ def handle_command(msg, cmd, arg):
             data["videos"].setdefault(day, {})[name] = {"name": name, "time": f"{int(hh):02d}:{mm}:00", "user_id": 0, "message_id": 0, "manual": True}
             save_json(DATA_PATH, data)
             send(chat_id, f"{day}: {name} — {int(hh):02d}:{mm} да келган деб белгиланди.", thread_id=thread)
+    elif cmd == "nom":
+        # /nom 8 Янги Исм  — rename an employee everywhere (list, bindings, history)
+        m_ = re.match(r"(\S+)\s+(.+)$", arg.strip(), re.S)
+        old_name = resolve_employee(m_.group(1)) if m_ else None
+        if not old_name:
+            send(chat_id, "Ёзинг: /nom 8 Янги Исм  (8 — рўйхатдаги рақами)", thread_id=thread)
+            return
+        new_name = m_.group(2).strip()
+        if new_name in config["employees"]:
+            send(chat_id, f"«{new_name}» аллақачон рўйхатда.", thread_id=thread)
+            return
+        config["employees"] = [new_name if e == old_name else e for e in config["employees"]]
+        config["bindings"] = {k: (new_name if v == old_name else v) for k, v in config["bindings"].items()}
+        save_json(CONFIG_PATH, config)
+        for part in ("videos", "reports", "photos"):
+            for day, bucket in data.get(part, {}).items():
+                if old_name in bucket:
+                    rec = bucket.pop(old_name)
+                    if isinstance(rec, dict) and rec.get("name") == old_name:
+                        rec["name"] = new_name
+                    bucket[new_name] = rec
+        save_json(DATA_PATH, data)
+        send(chat_id, f"Ўзгартирилди: {old_name} → {new_name}. Тарихи ва бириктирилган аккаунти сақланди.", thread_id=thread)
     elif cmd == "xodimlar":
         bound = {v: k for k, v in config["bindings"].items()}
         lines = ["Ходимлар рўйхати:"]
